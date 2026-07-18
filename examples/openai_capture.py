@@ -1,14 +1,11 @@
 import os
 
-from logllama import track_openai
+import logllama
 from openai import OpenAI
 
 
-client = track_openai(
-    OpenAI(api_key=os.environ["OPENAI_API_KEY"]),
-    api_key=os.getenv("LOGLLAMA_API_KEY", "llama-dev-key"),
-    endpoint=os.getenv("LOGLLAMA_ENDPOINT", "http://localhost:8000"),
-)
+logllama.init(api_key=os.getenv("LOGLLAMA_API_KEY", "llama-dev-key"))
+client = logllama.wrap_openai(OpenAI(api_key=os.environ["OPENAI_API_KEY"]))
 
 response = client.chat.completions.create(
     model="gpt-4o-mini",
