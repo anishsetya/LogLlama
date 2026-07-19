@@ -42,9 +42,9 @@ def _require_real_openai() -> None:
     if os.getenv(RUN_FLAG) != "1":
         pytest.skip(f"Set {RUN_FLAG}=1 to run OpenAI integration tests.")
     if not os.getenv("OPENAI_API_KEY"):
-        pytest.skip("Set OPENAI_API_KEY to run the valid-key OpenAI integration scenario.")
+        pytest.fail("OPENAI_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
     if not os.getenv("LOGLLAMA_API_KEY"):
-        pytest.skip("Set LOGLLAMA_API_KEY so the SDK can post events to the LogLlama backend.")
+        pytest.fail("LOGLLAMA_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
 
 
 def _require_backend() -> str:
@@ -75,7 +75,7 @@ def test_wrong_openai_api_key_posts_error_event_to_backend() -> None:
     if os.getenv(RUN_FLAG) != "1":
         pytest.skip(f"Set {RUN_FLAG}=1 to run OpenAI integration tests.")
     if not os.getenv("LOGLLAMA_API_KEY"):
-        pytest.skip("Set LOGLLAMA_API_KEY so the SDK can post events to the LogLlama backend.")
+        pytest.fail("LOGLLAMA_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
 
     endpoint = _require_backend()
     request_id = f"wrong-key-{uuid.uuid4().hex}"
