@@ -20,7 +20,63 @@ Every supported OpenAI call made through `client` is captured automatically.
 client.chat.completions.create(
     model="gpt-4o-mini",
     messages=[{"role": "user", "content": "Write a support email."}],
-    metadata={"route": "/support/email", "user_id": "user_123"},
+    logllama_metadata={
+        "route": "/support/email",
+        "user_id": "user_123",
+        "tenant_id": "tenant_acme",
+        "conversation_id": "conv_123",
+        "prompt_template": "support_email",
+        "prompt_version": "v3",
+    },
+)
+```
+
+Use `logllama_metadata` for LogLlama-only correlation data. The SDK removes it before calling OpenAI, which avoids provider validation limits such as OpenAI requiring `metadata` values to be strings.
+
+## Correlation Metadata
+
+Configure service-level metadata once:
+
+```python
+logllama.init(
+    api_key="YOUR_LOGLLAMA_KEY",
+    service_name="support-api",
+    environment="production",
+    version="1.8.0",
+    git_sha="abc123",
+    tags=["support"],
+)
+```
+
+Attach request-scoped context with a convenience API:
+
+```python
+with logllama.context(
+    route="/tickets/reply",
+    user_id="user_123",
+    tenant_id="tenant_acme",
+    session_id="sess_123",
+    conversation_id="conv_123",
+    request_id="req_123",
+    prompt_template="ticket_reply",
+    prompt_version="v7",
+):
+    client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+```
+
+You can also attach rich metadata to a single OpenAI call:
+
+```python
+client.responses.create(
+    model="gpt-5-nano",
+    input="Write a concise answer.",
+    metadata={"provider_tag": "safe-string-value"},
+    logllama_metadata={
+        "route": "/answers",
+        "tenant_id": "tenant_acme",
+        "tags": ["answers", "production"],
+        "custom_metadata": {"experiment": "v2"},
+    },
 )
 ```
 
@@ -54,16 +110,25 @@ client = logllama.wrap_openai(OpenAI())
 - estimated cost, calculated by the backend
 - errors
 - metadata
+- service, environment, version, and git SHA
+- route, user, tenant, session, conversation, request, trace, and span identifiers
+- prompt template and prompt version
+- tags and custom metadata
 
 ## Privacy Controls
 
-Disable prompt or response capture when needed:
+Disable prompt or response capture, redact sensitive keys, limit payload size, and filter metadata:
 
 ```python
 logllama.init(
     api_key="YOUR_LOGLLAMA_KEY",
     capture_prompts=False,
     capture_responses=False,
+    redact_keys=["password", "authorization", "api_key", "email"],
+    max_prompt_size=20000,
+    max_response_size=50000,
+    metadata_allowlist=["service_name", "environment", "route", "user_id", "tenant_id", "trace_id"],
+    metadata_denylist=["ssn", "credit_card"],
 )
 ```
 
@@ -72,7 +137,56 @@ Or through environment variables:
 ```text
 LOGLLAMA_CAPTURE_PROMPTS=false
 LOGLLAMA_CAPTURE_RESPONSES=false
+LOGLLAMA_REDACT_KEYS=password,authorization,api_key,email
+LOGLLAMA_MAX_PROMPT_SIZE=20000
+LOGLLAMA_MAX_RESPONSE_SIZE=50000
+LOGLLAMA_METADATA_ALLOWLIST=service_name,environment,route,user_id,tenant_id,trace_id
+LOGLLAMA_METADATA_DENYLIST=ssn,credit_card
+LOGLLAMA_SAMPLE_RATE=1
 ```
+
+Errors are captured by default even when successful requests are sampled.
+
+## FastAPI Helper
+
+```python
+from logllama.integrations.fastapi import LogLlamaMiddleware
+
+app.add_middleware(
+    LogLlamaMiddleware,
+    service_name="support-api",
+    environment="production",
+    get_user_id=lambda request: request.state.user_id,
+    get_tenant_id=lambda request: request.state.tenant_id,
+)
+```
+
+When OpenTelemetry is installed and active, the SDK automatically attaches the current `trace_id` and `span_id`.
+
+## Tests
+
+Install the SDK test dependencies:
+
+```bash
+cd sdk/python
+python -m pip install -e ".[test]"
+```
+
+Run normal SDK tests:
+
+```bash
+python -m pytest
+```
+
+Run the environment-dependent OpenAI integration tests:
+
+```bash
+RUN_LOGLLAMA_OPENAI_INTEGRATION=1 \
+OPENAI_API_KEY=sk-... \
+python -m pytest tests/integration -m integration
+```
+
+The valid-key scenario makes exactly one billable OpenAI Responses API request with `max_output_tokens=20`. The wrong-key scenario uses an intentionally invalid OpenAI key to verify error capture.
 
 ## Local Development
 
@@ -89,4 +203,3 @@ For the local backend, use:
 LOGLLAMA_API_KEY=llama-dev-key
 LOGLLAMA_ENDPOINT=http://localhost:8000
 ```
-

@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 import functools
+import hashlib
+import json
+import random
 import time
 from typing import Any, Callable
 
 from .client import monotonic_ms, new_external_id, now_iso, post_event_async, safe_json
-from .config import LogLlamaConfig, get_config
+from .config import LogLlamaConfig, get_config, get_context_metadata
+
+
+CORRELATION_FIELDS = {
+    "service_name",
+    "environment",
+    "version",
+    "git_sha",
+    "route",
+    "user_id",
+    "tenant_id",
+    "session_id",
+    "conversation_id",
+    "request_id",
+    "trace_id",
+    "span_id",
+    "prompt_template",
+    "prompt_version",
+}
 
 
 def wrap_openai(openai_client: Any, **kwargs: Any) -> Any:
@@ -23,6 +44,20 @@ def instrument_openai(
     timeout_seconds: float | None = None,
     capture_prompts: bool | None = None,
     capture_responses: bool | None = None,
+    service_name: str | None = None,
+    environment: str | None = None,
+    version: str | None = None,
+    git_sha: str | None = None,
+    default_metadata: dict[str, Any] | None = None,
+    tags: list[str] | tuple[str, ...] | None = None,
+    redact_keys: list[str] | tuple[str, ...] | None = None,
+    max_prompt_size: int | None = None,
+    max_response_size: int | None = None,
+    metadata_allowlist: list[str] | tuple[str, ...] | None = None,
+    metadata_denylist: list[str] | tuple[str, ...] | None = None,
+    sample_rate: float | None = None,
+    capture_errors: bool | None = None,
+    capture_otel: bool | None = None,
     enabled: bool | None = None,
 ) -> Any:
     config = get_config(
@@ -31,6 +66,20 @@ def instrument_openai(
         timeout_seconds=timeout_seconds,
         capture_prompts=capture_prompts,
         capture_responses=capture_responses,
+        service_name=service_name,
+        environment=environment,
+        version=version,
+        git_sha=git_sha,
+        default_metadata=default_metadata,
+        tags=tags,
+        redact_keys=redact_keys,
+        max_prompt_size=max_prompt_size,
+        max_response_size=max_response_size,
+        metadata_allowlist=metadata_allowlist,
+        metadata_denylist=metadata_denylist,
+        sample_rate=sample_rate,
+        capture_errors=capture_errors,
+        capture_otel=capture_otel,
         enabled=enabled,
     )
 
@@ -60,32 +109,40 @@ def _wrap_call(original: Callable[..., Any], operation: str, config: LogLlamaCon
         external_id = new_external_id()
         start = time.perf_counter()
         model = kwargs.get("model")
-        prompt = _extract_prompt(operation, kwargs) if config.capture_prompts else None
+        logllama_metadata = kwargs.pop("logllama_metadata", None)
+        prompt = _prepare_capture(_extract_prompt(operation, kwargs), config, "prompt")
+        metadata = _build_event_metadata(config, kwargs, external_id, logllama_metadata)
+        should_capture_success = _should_capture(config, metadata)
 
         try:
             response = original(*args, **kwargs)
         except Exception as exc:
-            post_event_async(
-                config,
-                {
-                    "external_id": external_id,
-                    "provider": "openai",
-                    "operation": operation,
-                    "model": model,
-                    "status": "error",
-                    "prompt": prompt,
-                    "response": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                    "latency_ms": monotonic_ms(start),
-                    "error": {"type": exc.__class__.__name__, "message": str(exc)},
-                    "metadata": _extract_metadata(kwargs),
-                    "captured_at": now_iso(),
-                },
-            )
+            if config.capture_errors:
+                post_event_async(
+                    config,
+                    {
+                        "external_id": external_id,
+                        "provider": "openai",
+                        "operation": operation,
+                        "model": model,
+                        "status": "error",
+                        "prompt": prompt,
+                        "response": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                        "latency_ms": monotonic_ms(start),
+                        "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                        **metadata,
+                        "captured_at": now_iso(),
+                    },
+                )
             raise
+
+        if not should_capture_success:
+            return response
 
         usage = _extract_usage(response)
         response_model = _extract_response_model(response) or model
+        captured_response = _prepare_capture(response, config, "response")
         post_event_async(
             config,
             {
@@ -95,11 +152,11 @@ def _wrap_call(original: Callable[..., Any], operation: str, config: LogLlamaCon
                 "model": response_model,
                 "status": "success",
                 "prompt": prompt,
-                "response": safe_json(response) if config.capture_responses else None,
+                "response": captured_response,
                 "usage": usage,
                 "latency_ms": monotonic_ms(start),
                 "error": None,
-                "metadata": _extract_metadata(kwargs),
+                **metadata,
                 "captured_at": now_iso(),
             },
         )
@@ -115,11 +172,191 @@ def _extract_prompt(operation: str, kwargs: dict[str, Any]) -> Any:
     return safe_json(kwargs.get("messages") or kwargs.get("prompt"))
 
 
-def _extract_metadata(kwargs: dict[str, Any]) -> dict[str, Any]:
-    metadata = kwargs.get("metadata")
-    if isinstance(metadata, dict):
-        return safe_json(metadata)
-    return {}
+def _extract_request_metadata(kwargs: dict[str, Any], logllama_metadata: Any = None) -> dict[str, Any]:
+    metadata = {}
+    provider_metadata = kwargs.get("metadata")
+    if isinstance(provider_metadata, dict):
+        metadata.update(safe_json(provider_metadata))
+    if isinstance(logllama_metadata, dict):
+        metadata.update(safe_json(logllama_metadata))
+    return metadata
+
+
+def _build_event_metadata(
+    config: LogLlamaConfig,
+    kwargs: dict[str, Any],
+    external_id: str,
+    logllama_metadata: Any = None,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    merged.update(
+        {
+            "service_name": config.service_name,
+            "environment": config.environment,
+            "version": config.version,
+            "git_sha": config.git_sha,
+        }
+    )
+    if config.default_metadata:
+        merged.update(safe_json(config.default_metadata))
+    merged.update(get_context_metadata())
+    merged.update(_extract_request_metadata(kwargs, logllama_metadata))
+    merged.update(_extract_otel_ids(config))
+
+    normalized = _filter_metadata(_redact_value(merged, config), config)
+    custom_metadata = normalized.pop("custom_metadata", {})
+    if not isinstance(custom_metadata, dict):
+        custom_metadata = {"value": custom_metadata}
+
+    event_metadata = {
+        field: normalized.pop(field, None)
+        for field in sorted(CORRELATION_FIELDS)
+    }
+    tags = _normalize_tags(config.tags, merged.get("tags"))
+    allowed_fields = {key.lower() for key in config.metadata_allowlist} if config.metadata_allowlist else None
+    if "tags" not in _denylisted_fields(config) and (allowed_fields is None or "tags" in allowed_fields):
+        event_metadata["tags"] = tags
+    else:
+        event_metadata["tags"] = []
+    normalized.pop("tags", None)
+
+    event_metadata.update(
+        {
+            "custom_metadata": {
+                **custom_metadata,
+                **normalized,
+            },
+            "metadata": {
+                **{key: value for key, value in event_metadata.items() if value is not None},
+                "tags": tags,
+                "custom_metadata": {**custom_metadata, **normalized},
+            },
+            "privacy": {
+                "capture_prompts": config.capture_prompts,
+                "capture_responses": config.capture_responses,
+                "redact_keys": sorted(set(config.redact_keys)),
+                "max_prompt_size": config.max_prompt_size,
+                "max_response_size": config.max_response_size,
+                "metadata_allowlist": list(config.metadata_allowlist) if config.metadata_allowlist else None,
+                "metadata_denylist": list(config.metadata_denylist),
+                "sample_rate": config.sample_rate,
+                "sampled": config.sample_rate < 1.0,
+                "sample_key": external_id,
+            },
+        }
+    )
+    return event_metadata
+
+
+def _prepare_capture(value: Any, config: LogLlamaConfig, payload_type: str) -> Any:
+    enabled = config.capture_prompts if payload_type == "prompt" else config.capture_responses
+    if not enabled:
+        return {
+            "_logllama_capture": "disabled",
+            "payload_type": payload_type,
+        }
+
+    redacted = _redact_value(safe_json(value), config)
+    max_size = config.max_prompt_size if payload_type == "prompt" else config.max_response_size
+    return _truncate_value(redacted, max_size, payload_type)
+
+
+def _redact_value(value: Any, config: LogLlamaConfig) -> Any:
+    redact_keys = {key.lower() for key in config.redact_keys}
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            if str(key).lower() in redact_keys:
+                redacted[str(key)] = "[REDACTED]"
+            else:
+                redacted[str(key)] = _redact_value(item, config)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_value(item, config) for item in value]
+    return value
+
+
+def _truncate_value(value: Any, max_size: int | None, payload_type: str) -> Any:
+    if max_size is None or max_size <= 0:
+        return value
+    encoded = json.dumps(value, default=str)
+    size = len(encoded.encode("utf-8"))
+    if size <= max_size:
+        return value
+    preview = encoded.encode("utf-8")[:max_size].decode("utf-8", errors="ignore")
+    return {
+        "_logllama_capture": "truncated",
+        "payload_type": payload_type,
+        "size_bytes": size,
+        "max_size_bytes": max_size,
+        "preview": preview,
+    }
+
+
+def _filter_metadata(metadata: dict[str, Any], config: LogLlamaConfig) -> dict[str, Any]:
+    denylist = _denylisted_fields(config)
+    allowlist = {key.lower() for key in config.metadata_allowlist} if config.metadata_allowlist else None
+    filtered = {}
+    for key, value in metadata.items():
+        normalized_key = str(key)
+        comparable = normalized_key.lower()
+        if comparable in denylist:
+            continue
+        if allowlist is not None and comparable not in allowlist:
+            continue
+        filtered[normalized_key] = value
+    return filtered
+
+
+def _denylisted_fields(config: LogLlamaConfig) -> set[str]:
+    return {key.lower() for key in config.metadata_denylist}
+
+
+def _normalize_tags(config_tags: tuple[str, ...], request_tags: Any) -> list[str]:
+    tags = list(config_tags)
+    if isinstance(request_tags, str):
+        tags.append(request_tags)
+    elif isinstance(request_tags, (list, tuple, set)):
+        tags.extend(str(tag) for tag in request_tags if tag is not None)
+    return sorted(set(tags))
+
+
+def _should_capture(config: LogLlamaConfig, metadata: dict[str, Any]) -> bool:
+    if config.sample_rate >= 1.0:
+        return True
+    if config.sample_rate <= 0.0:
+        return False
+    seed = (
+        metadata.get("request_id")
+        or metadata.get("trace_id")
+        or metadata.get("conversation_id")
+        or metadata.get("metadata", {}).get("request_id")
+    )
+    if seed:
+        digest = hashlib.sha256(str(seed).encode("utf-8")).hexdigest()
+        value = int(digest[:8], 16) / 0xFFFFFFFF
+        return value < config.sample_rate
+    return random.random() < config.sample_rate
+
+
+def _extract_otel_ids(config: LogLlamaConfig) -> dict[str, str]:
+    if not config.capture_otel:
+        return {}
+    try:
+        from opentelemetry import trace
+    except Exception:
+        return {}
+
+    try:
+        span_context = trace.get_current_span().get_span_context()
+    except Exception:
+        return {}
+    if not getattr(span_context, "is_valid", False):
+        return {}
+    return {
+        "trace_id": format(span_context.trace_id, "032x"),
+        "span_id": format(span_context.span_id, "016x"),
+    }
 
 
 def _extract_response_model(response: Any) -> str | None:
@@ -162,4 +399,3 @@ def _get_usage_value(usage: Any, *names: str) -> int:
             except (TypeError, ValueError):
                 return 0
     return 0
-

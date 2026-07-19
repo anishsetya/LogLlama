@@ -26,7 +26,24 @@ event = {
     },
     "usage": {"input_tokens": 18, "output_tokens": 14, "total_tokens": 32},
     "latency_ms": 842,
-    "metadata": {"route": "/demo", "user_id": "local-dev"},
+    "service_name": "demo-api",
+    "environment": "local",
+    "version": "0.1.0",
+    "git_sha": "local-dev",
+    "route": "/demo",
+    "user_id": "local-dev",
+    "tenant_id": "tenant_demo",
+    "session_id": "sess_demo",
+    "conversation_id": "conv_demo",
+    "request_id": "req_demo_001",
+    "trace_id": "trace_demo",
+    "span_id": "span_demo_001",
+    "prompt_template": "observability_explainer",
+    "prompt_version": "v1",
+    "tags": ["demo", "docs"],
+    "custom_metadata": {"feature": "quickstart"},
+    "privacy": {"capture_prompts": True, "capture_responses": True, "sample_rate": 1},
+    "metadata": {"legacy_route": "/demo"},
     "captured_at": datetime.now(timezone.utc).isoformat(),
 }
 
@@ -41,4 +58,3 @@ req = request.Request(
 
 with request.urlopen(req, timeout=5) as response:
     print(response.status, response.read().decode("utf-8"))
-

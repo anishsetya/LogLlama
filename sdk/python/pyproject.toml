@@ -24,6 +24,18 @@ classifiers = [
 Homepage = "https://github.com/logllama/logllama"
 Repository = "https://github.com/logllama/logllama"
 
+[project.optional-dependencies]
+test = [
+    "openai>=1.0.0",
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that can call external services and require explicit opt-in",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["logllama*"]
