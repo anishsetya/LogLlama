@@ -1,0 +1,93 @@
+name: SDK Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_openai_integration:
+        description: Run the real OpenAI integration scenarios
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  sdk-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install SDK test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Run safe SDK tests
+        run: python -m pytest tests -q
+
+  openai-integration:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_openai_integration == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: logllama
+          POSTGRES_PASSWORD: logllama
+          POSTGRES_DB: logllama
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U logllama -d logllama"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install SDK test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Install backend dependencies
+        working-directory: backend
+        run: python -m pip install -r requirements.txt
+      - name: Require OpenAI secret
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY" || {
+            echo "OPENAI_API_KEY secret is required for the manual OpenAI integration job."
+            exit 1
+          }
+      - name: Start LogLlama backend
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://logllama:logllama@localhost:5432/logllama
+          LOGLLAMA_DEFAULT_API_KEY: llama-dev-key
+          LOGLLAMA_DEFAULT_PROJECT_NAME: CI Integration
+        run: |
+          python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/logllama-backend.log 2>&1 &
+          for attempt in {1..30}; do
+            curl -fsS http://127.0.0.1:8000/health && exit 0
+            sleep 1
+          done
+          cat /tmp/logllama-backend.log
+          exit 1
+      - name: Run real OpenAI integration tests
+        env:
+          RUN_LOGLLAMA_OPENAI_INTEGRATION: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LOGLLAMA_API_KEY: llama-dev-key
+          LOGLLAMA_ENDPOINT: http://127.0.0.1:8000
+          LOGLLAMA_OPENAI_TEST_MODEL: gpt-5-nano
+        run: python -m pytest tests/integration -m integration -q

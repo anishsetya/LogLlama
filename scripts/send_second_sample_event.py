@@ -29,7 +29,23 @@ event = {
     },
     "usage": {"input_tokens": 42, "output_tokens": 21, "total_tokens": 63},
     "latency_ms": 1486,
-    "metadata": {"route": "/debug/latency", "user_id": "tester-002", "environment": "local"},
+    "service_name": "debug-api",
+    "environment": "local",
+    "version": "0.1.1",
+    "git_sha": "local-latency",
+    "route": "/debug/latency",
+    "user_id": "tester-002",
+    "tenant_id": "tenant_demo",
+    "session_id": "sess_debug",
+    "conversation_id": "conv_debug",
+    "request_id": f"req_debug_{datetime.now(timezone.utc).timestamp()}",
+    "trace_id": "trace_debug",
+    "span_id": "span_debug_001",
+    "prompt_template": "latency_diagnosis",
+    "prompt_version": "v2",
+    "tags": ["debug", "latency"],
+    "custom_metadata": {"release_channel": "local"},
+    "privacy": {"capture_prompts": True, "capture_responses": True, "sample_rate": 1},
     "captured_at": datetime.now(timezone.utc).isoformat(),
 }
 
@@ -44,4 +60,3 @@ req = request.Request(
 
 with request.urlopen(req, timeout=5) as response:
     print(response.status, response.read().decode("utf-8"))
-

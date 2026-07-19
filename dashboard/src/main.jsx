@@ -4,20 +4,30 @@ import {
   Activity,
   AlertTriangle,
   Braces,
+  CalendarDays,
   Clock3,
   Coins,
-  Gauge,
-  Layers3,
+  Fingerprint,
+  GitCommit,
   RefreshCw,
   Search,
   Server,
-  Sparkles,
-  TerminalSquare,
+  ShieldCheck,
+  SlidersHorizontal,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-
+const DEFAULT_RANGE = { amount: 24, unit: "hours" };
+const RANGE_PRESETS = [
+  { label: "5m", minutes: 5 },
+  { label: "30m", minutes: 30 },
+  { label: "1h", minutes: 60 },
+  { label: "6h", minutes: 360 },
+  { label: "24h", minutes: 1440 },
+  { label: "7d", minutes: 10080 },
+];
 function formatMoney(value) {
   return `$${Number(value || 0).toFixed(6)}`;
 }
@@ -33,6 +43,37 @@ function formatDate(value) {
 
 function compactNumber(value) {
   return new Intl.NumberFormat(undefined, { notation: "compact" }).format(Number(value || 0));
+}
+
+function display(value, fallback = "unknown") {
+  return value || fallback;
+}
+
+function toMinutes(range) {
+  const amount = Number(range.amount) || 1;
+  if (range.unit === "minutes") return amount;
+  if (range.unit === "hours") return amount * 60;
+  return amount * 24 * 60;
+}
+
+function formatRangeLabel(minutes) {
+  if (minutes < 60) return `Last ${minutes} min`;
+  if (minutes % (24 * 60) === 0) {
+    const days = minutes / (24 * 60);
+    return `Last ${days} ${days === 1 ? "day" : "days"}`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `Last ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  return `Last ${minutes} min`;
+}
+
+function privacyState(payload) {
+  if (!payload) return "not captured";
+  if (payload._logllama_capture === "disabled") return "disabled";
+  if (payload._logllama_capture === "truncated") return "truncated";
+  return "captured";
 }
 
 function BrandMark() {
@@ -60,31 +101,119 @@ function MetricCard({ icon: Icon, label, value, detail, tone }) {
   );
 }
 
+function SelectFilter({ label, value, options, onChange }) {
+  return (
+    <label className={`filterSelect ${value ? "active" : ""}`}>
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">All</option>
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function DurationControl({ value, onChange }) {
+  const minutes = toMinutes(value);
+  const setAmount = (nextValue) => {
+    const parsed = Number(nextValue);
+    if (Number.isNaN(parsed)) return;
+    const max = value.unit === "days" ? 30 : value.unit === "hours" ? 24 * 30 : 60 * 24 * 30;
+    onChange({ ...value, amount: Math.min(max, Math.max(1, parsed)) });
+  };
+  const setUnit = (unit) => {
+    const max = unit === "days" ? 30 : unit === "hours" ? 24 * 30 : 60 * 24 * 30;
+    onChange({ amount: Math.min(max, Math.max(1, Number(value.amount) || 1)), unit });
+  };
+
+  return (
+    <div className="durationControl" aria-label="Time range">
+      <label htmlFor="timeRangeAmount">
+        <CalendarDays size={15} />
+        <span>Last</span>
+        <input
+          id="timeRangeAmount"
+          min="1"
+          type="number"
+          value={value.amount}
+          onChange={(event) => setAmount(event.target.value)}
+        />
+        <select aria-label="Time unit" value={value.unit} onChange={(event) => setUnit(event.target.value)}>
+          <option value="minutes">min</option>
+          <option value="hours">hours</option>
+          <option value="days">days</option>
+        </select>
+      </label>
+      <div className="durationPresets" aria-label="Quick ranges">
+        {RANGE_PRESETS.map((preset) => (
+          <button key={preset.label} className={minutes === preset.minutes ? "active" : ""} type="button" onClick={() => onChange(minutesToRange(preset.minutes))}>
+            {preset.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function minutesToRange(minutes) {
+  if (minutes % (24 * 60) === 0) return { amount: minutes / (24 * 60), unit: "days" };
+  if (minutes % 60 === 0) return { amount: minutes / 60, unit: "hours" };
+  return { amount: minutes, unit: "minutes" };
+}
+
 function RequestRow({ request, selected, onSelect }) {
   return (
     <button className={`requestRow ${selected ? "selected" : ""}`} onClick={() => onSelect(request)}>
       <span>
         <StatusPill status={request.status} />
       </span>
-      <span className="modelCell">{request.model || "unknown"}</span>
-      <span className="routeCell">{request.request_metadata?.route || request.operation}</span>
+      <span className="modelCell">{display(request.service_name || request.model)}</span>
+      <span className="routeCell">{display(request.route || request.operation)}</span>
+      <span>{display(request.environment, "env n/a")}</span>
+      <span>{display(request.tenant_id, "tenant n/a")}</span>
       <span>{request.latency_ms} ms</span>
-      <span>{compactNumber(request.total_tokens)}</span>
-      <span>{formatMoney(request.cost_usd)}</span>
       <span>{formatDate(request.captured_at)}</span>
     </button>
   );
 }
 
-function JsonBlock({ title, value }) {
+function JsonBlock({ title, value, defaultOpen = false }) {
   return (
-    <section className="jsonBlock">
-      <div className="jsonTitle">
+    <details className="jsonBlock" open={defaultOpen}>
+      <summary className="jsonTitle">
         <Braces size={14} />
         <h3>{title}</h3>
-      </div>
+      </summary>
       <pre>{JSON.stringify(value, null, 2)}</pre>
-    </section>
+    </details>
+  );
+}
+
+function FieldGrid({ items }) {
+  return (
+    <dl className="fieldGrid">
+      {items.map(({ label, value, mono }) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd className={mono ? "monoValue" : ""}>{display(value, "not set")}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function TagList({ tags }) {
+  if (!tags?.length) return <span className="mutedText">No tags</span>;
+  return (
+    <div className="tagList">
+      {tags.map((tag) => (
+        <span key={tag}>{tag}</span>
+      ))}
+    </div>
   );
 }
 
@@ -94,7 +223,7 @@ function RequestDetail({ request }) {
       <aside className="detailPane empty">
         <Server size={22} />
         <h2>No trace selected</h2>
-        <p>Select a request to inspect prompt, response, usage, timing, and metadata.</p>
+        <p>Select a request to inspect correlation, privacy, usage, prompt, response, and metadata.</p>
       </aside>
     );
   }
@@ -104,9 +233,9 @@ function RequestDetail({ request }) {
       <div className="detailHeader">
         <div>
           <span className="eyebrow">Inspector</span>
-          <h2>{request.model || "Unknown model"}</h2>
+          <h2>{display(request.route || request.operation)}</h2>
           <p>
-            {request.provider} / {request.operation}
+            {display(request.service_name, "service n/a")} / {display(request.model)}
           </p>
         </div>
         <StatusPill status={request.status} />
@@ -119,7 +248,7 @@ function RequestDetail({ request }) {
         </div>
         <div>
           <dt>Tokens</dt>
-          <dd>{request.total_tokens}</dd>
+          <dd>{compactNumber(request.total_tokens)}</dd>
         </div>
         <div>
           <dt>Cost</dt>
@@ -134,9 +263,60 @@ function RequestDetail({ request }) {
         </section>
       )}
 
-      <JsonBlock title="Prompt" value={request.prompt} />
+      <section className="detailSection">
+        <div className="sectionTitle">
+          <Fingerprint size={15} />
+          <h3>Correlation</h3>
+        </div>
+        <FieldGrid
+          items={[
+            { label: "Tenant", value: request.tenant_id },
+            { label: "User", value: request.user_id },
+            { label: "Session", value: request.session_id, mono: true },
+            { label: "Conversation", value: request.conversation_id, mono: true },
+            { label: "Request", value: request.request_id, mono: true },
+            { label: "Trace", value: request.trace_id, mono: true },
+            { label: "Span", value: request.span_id, mono: true },
+          ]}
+        />
+      </section>
+
+      <section className="detailSection">
+        <div className="sectionTitle">
+          <GitCommit size={15} />
+          <h3>Runtime</h3>
+        </div>
+        <FieldGrid
+          items={[
+            { label: "Service", value: request.service_name },
+            { label: "Environment", value: request.environment },
+            { label: "Version", value: request.version },
+            { label: "Git SHA", value: request.git_sha, mono: true },
+            { label: "Prompt", value: request.prompt_template },
+            { label: "Prompt version", value: request.prompt_version },
+          ]}
+        />
+        <div className="tagsBlock">
+          <span>Tags</span>
+          <TagList tags={request.tags} />
+        </div>
+      </section>
+
+      <section className="detailSection">
+        <div className="sectionTitle">
+          <ShieldCheck size={15} />
+          <h3>Privacy</h3>
+        </div>
+        <div className="privacyGrid">
+          <span>Prompt: {privacyState(request.prompt)}</span>
+          <span>Response: {privacyState(request.response)}</span>
+          <span>Sampling: {request.privacy?.sample_rate ?? 1}</span>
+        </div>
+      </section>
+
+      <JsonBlock title="Prompt" value={request.prompt} defaultOpen />
       <JsonBlock title="Response" value={request.response} />
-      <JsonBlock title="Metadata" value={request.request_metadata || {}} />
+      <JsonBlock title="Custom Metadata" value={request.custom_metadata || {}} />
     </aside>
   );
 }
@@ -144,8 +324,19 @@ function RequestDetail({ request }) {
 function App() {
   const [summary, setSummary] = React.useState(null);
   const [requests, setRequests] = React.useState([]);
+  const [facets, setFacets] = React.useState({});
   const [selected, setSelected] = React.useState(null);
   const [query, setQuery] = React.useState("");
+  const deferredQuery = React.useDeferredValue(query.trim());
+  const [timeRange, setTimeRange] = React.useState(DEFAULT_RANGE);
+  const [filters, setFilters] = React.useState({
+    environment: "",
+    service_name: "",
+    tenant_id: "",
+    route: "",
+    model: "",
+    status: "",
+  });
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
 
@@ -153,24 +344,41 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const [summaryResponse, requestResponse] = await Promise.all([
-        fetch(`${API_BASE}/api/metrics/summary?hours=24`),
-        fetch(`${API_BASE}/api/requests?limit=100`),
+      const rangeMinutes = toMinutes(timeRange);
+      const params = new URLSearchParams({ limit: "100", minutes: String(rangeMinutes) });
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value) params.set(key, value);
+      });
+      if (deferredQuery) params.set("q", deferredQuery);
+
+      const summaryParams = new URLSearchParams(params);
+      summaryParams.delete("limit");
+
+      const facetParams = new URLSearchParams(params);
+      facetParams.delete("limit");
+
+      const [summaryResponse, requestResponse, facetsResponse] = await Promise.all([
+        fetch(`${API_BASE}/api/metrics/summary?${summaryParams.toString()}`),
+        fetch(`${API_BASE}/api/requests?${params.toString()}`),
+        fetch(`${API_BASE}/api/metadata/facets?${facetParams.toString()}`),
       ]);
-      if (!summaryResponse.ok || !requestResponse.ok) {
+      if (!summaryResponse.ok || !requestResponse.ok || !facetsResponse.ok) {
         throw new Error("Backend returned an error");
       }
       const summaryJson = await summaryResponse.json();
       const requestJson = await requestResponse.json();
+      const facetsJson = await facetsResponse.json();
+      const nextRequests = requestJson.requests || [];
       setSummary(summaryJson);
-      setRequests(requestJson.requests || []);
-      setSelected((current) => current || requestJson.requests?.[0] || null);
+      setRequests(nextRequests);
+      setFacets(facetsJson);
+      setSelected((current) => nextRequests.find((request) => request.id === current?.id) || nextRequests[0] || null);
     } catch (err) {
       setError(err.message || "Unable to load LogLlama data");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [deferredQuery, filters, timeRange]);
 
   React.useEffect(() => {
     load();
@@ -178,95 +386,62 @@ function App() {
     return () => window.clearInterval(interval);
   }, [load]);
 
-  const filtered = requests.filter((request) => {
-    const haystack = [
-      request.model,
-      request.operation,
-      request.status,
-      request.request_metadata?.route,
-      request.request_metadata?.user_id,
-    ]
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(query.toLowerCase());
-  });
+  const filtered = requests;
+  const activeFilterCount = Object.values(filters).filter(Boolean).length + (deferredQuery ? 1 : 0);
+  const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+  const resetFilters = () => {
+    setQuery("");
+    setTimeRange(DEFAULT_RANGE);
+    setFilters({
+      environment: "",
+      service_name: "",
+      tenant_id: "",
+      route: "",
+      model: "",
+      status: "",
+    });
+  };
+  const rangeMinutes = toMinutes(timeRange);
+  const rangeLabel = formatRangeLabel(rangeMinutes);
 
   return (
     <main className="appShell">
-      <aside className="sidebar">
-        <div className="brand">
-          <BrandMark />
-          <div>
-            <strong>LogLlama</strong>
-            <span>AI debug console</span>
-          </div>
-        </div>
-
-        <nav className="navRail" aria-label="Primary">
-          <a className="active" href="/">
-            <TerminalSquare size={16} />
-            Traces
-          </a>
-          <a href="/">
-            <Gauge size={16} />
-            Metrics
-          </a>
-          <a href="/">
-            <Layers3 size={16} />
-            Prompts
-          </a>
-          <a href="/">
-            <Sparkles size={16} />
-            Diagnosis
-          </a>
-        </nav>
-
-        <div className="sidebarMeta">
-          <span>Project</span>
-          <strong>Development</strong>
-          <code>llama-dev-key</code>
-        </div>
-      </aside>
-
       <section className="content">
         <header className="topbar">
-          <div>
-            <span className="eyebrow">Live local capture</span>
-            <h1>Traces</h1>
-            <p>Monitor OpenAI requests, latency, cost, tokens, prompts, and responses.</p>
+          <div className="topbarLead">
+            <div className="brand compact">
+              <BrandMark />
+              <div>
+                <strong>LogLlama</strong>
+                <span>AI correlation console</span>
+              </div>
+            </div>
+            <div>
+              <span className="eyebrow">Live local capture</span>
+              <h1>Traces</h1>
+              <p>Correlate LLM calls by service, tenant, route, release, prompt version, model, and trace context.</p>
+            </div>
           </div>
-          <button className="refreshButton" onClick={load} aria-label="Refresh data">
-            <RefreshCw size={16} />
-            <span>{loading ? "Syncing" : "Refresh"}</span>
-          </button>
+          <div className="topbarActions">
+            <DurationControl value={timeRange} onChange={setTimeRange} />
+            <button className="refreshButton" onClick={load} aria-label="Refresh data">
+              <RefreshCw size={16} />
+              <span>{loading ? "Syncing" : "Refresh"}</span>
+            </button>
+          </div>
         </header>
 
         {error && <div className="banner">{error}</div>}
 
         <section className="metricsGrid">
-          <MetricCard
-            icon={Activity}
-            label="Requests"
-            value={summary?.total_requests ?? 0}
-            detail="Last 24 hours"
-          />
-          <MetricCard
-            icon={Coins}
-            label="Spend"
-            value={formatMoney(summary?.total_cost_usd)}
-            detail="Estimated model cost"
-          />
-          <MetricCard
-            icon={Clock3}
-            label="Latency"
-            value={`${Math.round(summary?.avg_latency_ms || 0)} ms`}
-            detail="Average response time"
-          />
+          <MetricCard icon={Activity} label="Requests" value={summary?.total_requests ?? 0} detail={rangeLabel} />
+          <MetricCard icon={Coins} label="Spend" value={formatMoney(summary?.total_cost_usd)} detail={`${rangeLabel} estimated cost`} />
+          <MetricCard icon={Clock3} label="Latency" value={`${Math.round(summary?.avg_latency_ms || 0)} ms`} detail={`${rangeLabel} average`} />
           <MetricCard
             icon={AlertTriangle}
             label="Error rate"
             value={`${Math.round((summary?.error_rate || 0) * 100)}%`}
-            detail="Failed requests"
+            detail={`${rangeLabel} failures`}
             tone={summary?.error_rate ? "warning" : ""}
           />
         </section>
@@ -276,35 +451,48 @@ function App() {
             <div className="panelHeader">
               <div>
                 <h2>Request stream</h2>
-                <p>{filtered.length} traces shown</p>
+                <p>
+                  {filtered.length} traces shown, {rangeLabel.toLowerCase()}
+                </p>
               </div>
               <label className="search">
                 <Search size={15} />
-                <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search model, route, user"
-                />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search like GCP: trace, tenant, route, model, prompt" />
               </label>
+            </div>
+
+            <div className="filterBar">
+              <div className="filterSummary" title="Filters apply to metrics, facets, and request rows">
+                <SlidersHorizontal size={15} />
+                <div>
+                  <strong>{activeFilterCount ? `${activeFilterCount} active` : "All traces"}</strong>
+                  <span>Dashboard scope</span>
+                </div>
+              </div>
+              <SelectFilter label="Env" value={filters.environment} options={facets.environments || []} onChange={(value) => setFilter("environment", value)} />
+              <SelectFilter label="Service" value={filters.service_name} options={facets.service_names || []} onChange={(value) => setFilter("service_name", value)} />
+              <SelectFilter label="Tenant" value={filters.tenant_id} options={facets.tenant_ids || []} onChange={(value) => setFilter("tenant_id", value)} />
+              <SelectFilter label="Route" value={filters.route} options={facets.routes || []} onChange={(value) => setFilter("route", value)} />
+              <SelectFilter label="Model" value={filters.model} options={facets.models || []} onChange={(value) => setFilter("model", value)} />
+              <SelectFilter label="Status" value={filters.status} options={facets.statuses || []} onChange={(value) => setFilter("status", value)} />
+              <button className="clearFilters" type="button" onClick={resetFilters} disabled={!activeFilterCount && rangeMinutes === toMinutes(DEFAULT_RANGE)}>
+                <X size={14} />
+                <span>Reset</span>
+              </button>
             </div>
 
             <div className="requestHeader">
               <span>Status</span>
-              <span>Model</span>
+              <span>Service / Model</span>
               <span>Route</span>
+              <span>Env</span>
+              <span>Tenant</span>
               <span>Latency</span>
-              <span>Tokens</span>
-              <span>Cost</span>
               <span>Captured</span>
             </div>
             <div className="requestList">
               {filtered.map((request) => (
-                <RequestRow
-                  key={request.id}
-                  request={request}
-                  selected={selected?.id === request.id}
-                  onSelect={setSelected}
-                />
+                <RequestRow key={request.id} request={request} selected={selected?.id === request.id} onSelect={setSelected} />
               ))}
               {!filtered.length && <div className="emptyList">No matching traces</div>}
             </div>
