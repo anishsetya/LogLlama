@@ -370,12 +370,16 @@ def _extract_response_model(response: Any) -> str | None:
 
 def _extract_usage(response: Any) -> dict[str, int]:
     usage = getattr(response, "usage", None)
+    if usage is None:
+        usage = getattr(response, "usage_metadata", None)
     if usage is None and isinstance(response, dict):
-        usage = response.get("usage")
+        usage = response.get("usage") or response.get("usage_metadata")
 
-    input_tokens = _get_usage_value(usage, "prompt_tokens", "input_tokens")
-    output_tokens = _get_usage_value(usage, "completion_tokens", "output_tokens")
-    total_tokens = _get_usage_value(usage, "total_tokens")
+    input_tokens = _get_usage_value(usage, "prompt_tokens", "input_tokens", "prompt_token_count")
+    output_tokens = _get_usage_value(
+        usage, "completion_tokens", "output_tokens", "candidates_token_count"
+    )
+    total_tokens = _get_usage_value(usage, "total_tokens", "total_token_count")
     if not total_tokens:
         total_tokens = input_tokens + output_tokens
 

@@ -118,3 +118,80 @@ class SummaryOut(BaseModel):
     error_rate: float
     total_tokens: int
     series: list[MetricPoint]
+
+
+class ProviderCredentialCreate(BaseModel):
+    provider: str = Field(pattern="^(openai|anthropic|gemini)$")
+    api_key: str = Field(min_length=8, max_length=1000)
+    name: str = Field(default="default", min_length=1, max_length=120)
+
+
+class ProviderCredentialOut(BaseModel):
+    id: UUID
+    provider: str
+    name: str
+    fingerprint: str
+    version: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProviderCredentialListOut(BaseModel):
+    credentials: list[ProviderCredentialOut]
+    secret_backend: str
+
+
+class RuntimeCredentialOut(BaseModel):
+    provider: str
+    api_key: str
+    version: int
+    updated_at: datetime
+
+
+class RuntimeCredentialListOut(BaseModel):
+    credentials: list[RuntimeCredentialOut]
+
+
+class TestTarget(BaseModel):
+    provider: str = Field(pattern="^(openai|anthropic|gemini|claude)$")
+    model: str = Field(min_length=1, max_length=160)
+
+
+class TestPlanCreate(BaseModel):
+    prompt: str = Field(min_length=1, max_length=100_000)
+    system: str | None = Field(default=None, max_length=20_000)
+    targets: list[TestTarget] = Field(min_length=2, max_length=10)
+    max_output_tokens: int = Field(default=256, ge=1, le=8192)
+    max_runs: int = Field(default=1, ge=1, le=100)
+    requested_by: str | None = Field(default=None, max_length=160)
+
+
+class TestPlanDecision(BaseModel):
+    reason: str | None = Field(default=None, max_length=2000)
+    expires_in_hours: int = Field(default=24, ge=1, le=168)
+
+
+class TestPlanOut(BaseModel):
+    id: UUID
+    prompt: str
+    system: str | None
+    targets: list[dict[str, str]]
+    max_output_tokens: int
+    max_runs: int
+    run_count: int
+    status: str
+    requested_by: str | None
+    approved_by: str | None
+    rejection_reason: str | None
+    created_at: datetime
+    approved_at: datetime | None
+    expires_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TestPlanListOut(BaseModel):
+    test_plans: list[TestPlanOut]

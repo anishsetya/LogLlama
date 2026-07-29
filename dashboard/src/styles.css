@@ -146,6 +146,35 @@ h1 {
   line-height: 1.4;
 }
 
+.viewTabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 9px;
+}
+
+.viewTabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.viewTabs button:hover,
+.viewTabs button.active {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--panel-raised);
+}
+
 .topbarActions {
   display: flex;
   align-items: center;
@@ -578,6 +607,263 @@ h3 {
   background: rgba(248, 81, 73, 0.24);
 }
 
+.status.active,
+.status.approved {
+  color: #d9ffe4;
+  background: rgba(63, 185, 80, 0.22);
+}
+
+.status.pending {
+  color: #ffeab0;
+  background: rgba(210, 153, 34, 0.2);
+}
+
+.status.rejected {
+  color: #ffe2e0;
+  background: rgba(248, 81, 73, 0.2);
+}
+
+.adminWorkspace {
+  display: grid;
+  gap: 12px;
+}
+
+.adminIntro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.adminIntro h2 {
+  margin-top: 5px;
+  font-size: 1.15rem;
+}
+
+.adminIntro p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.iconCommand,
+.dangerIcon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--panel-raised);
+  cursor: pointer;
+}
+
+.iconCommand:hover {
+  color: var(--text);
+  border-color: rgba(90, 169, 255, 0.58);
+}
+
+.credentialForm {
+  display: grid;
+  grid-template-columns: 160px minmax(150px, 0.6fr) minmax(240px, 1.4fr) auto;
+  gap: 9px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.credentialForm label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.credentialForm label > span {
+  color: var(--muted-soft);
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.credentialForm input,
+.credentialForm select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: 0;
+  color: var(--text);
+  background: #0b1117;
+}
+
+.credentialForm input:focus,
+.credentialForm select:focus {
+  border-color: rgba(138, 223, 159, 0.58);
+  box-shadow: 0 0 0 2px rgba(138, 223, 159, 0.08);
+}
+
+.primaryCommand,
+.approveCommand,
+.rejectCommand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.primaryCommand,
+.approveCommand {
+  border-color: rgba(63, 185, 80, 0.45);
+  color: #d9ffe4;
+  background: rgba(63, 185, 80, 0.16);
+}
+
+.rejectCommand {
+  border-color: rgba(248, 81, 73, 0.38);
+  color: #ffd7d5;
+  background: rgba(248, 81, 73, 0.1);
+}
+
+.primaryCommand:disabled,
+.approveCommand:disabled,
+.rejectCommand:disabled,
+.dangerIcon:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.adminTable {
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.adminTableHeader,
+.adminTableRow {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 8px 12px;
+}
+
+.credentialColumns {
+  grid-template-columns: 110px minmax(120px, 1fr) 130px 70px 90px 36px;
+}
+
+.adminTableHeader {
+  min-height: 36px;
+  color: var(--muted-soft);
+  background: var(--panel-soft);
+  font-size: 0.67rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.adminTableRow {
+  border-top: 1px solid var(--border-soft);
+  color: #c9d4dd;
+  font-size: 0.82rem;
+}
+
+.adminTableRow code,
+.targetList code {
+  overflow: hidden;
+  color: #b9d9f6;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dangerIcon {
+  color: #ffb4ad;
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.testPlanList {
+  display: grid;
+  gap: 10px;
+}
+
+.testPlan {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.testPlan > header,
+.testPlan > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+}
+
+.testPlan h3 {
+  margin-top: 4px;
+  text-transform: capitalize;
+}
+
+.promptPreview {
+  max-height: 150px;
+  border-right: 0;
+  border-left: 0;
+  border-radius: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.targetList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.targetList > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #0c1117;
+  font-size: 0.76rem;
+}
+
+.targetList strong {
+  text-transform: capitalize;
+}
+
+.testPlan > footer > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.decisionActions {
+  display: flex;
+  gap: 7px;
+}
+
 .detailPane {
   position: sticky;
   top: 16px;
@@ -852,6 +1138,10 @@ pre {
   .workspace {
     grid-template-columns: 1fr;
   }
+
+  .credentialForm {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 780px) {
@@ -880,6 +1170,14 @@ pre {
   .fieldGrid,
   .privacyGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .credentialColumns {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .adminTableHeader {
+    display: none;
   }
 }
 
@@ -934,5 +1232,25 @@ pre {
 
   .metric {
     min-height: 86px;
+  }
+
+  .viewTabs,
+  .credentialForm,
+  .credentialColumns {
+    grid-template-columns: 1fr;
+  }
+
+  .viewTabs {
+    display: grid;
+  }
+
+  .testPlan > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .decisionActions,
+  .decisionActions button {
+    width: 100%;
   }
 }
