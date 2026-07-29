@@ -22,6 +22,9 @@ class EventIn(BaseModel):
     provider: str = Field(default="openai", max_length=40)
     operation: str = Field(default="chat.completions.create", max_length=120)
     model: str | None = None
+    provider_request_id: str | None = Field(default=None, max_length=255)
+    retry_count: int = Field(default=0, ge=0)
+    model_parameters: dict[str, Any] = Field(default_factory=dict)
     status: str = Field(pattern="^(success|error)$")
     prompt: Any = None
     response: Any = None
@@ -56,6 +59,9 @@ class RequestOut(BaseModel):
     provider: str
     operation: str
     model: str | None
+    provider_request_id: str | None
+    retry_count: int
+    model_parameters: dict[str, Any] | None
     status: str
     prompt: Any
     response: Any

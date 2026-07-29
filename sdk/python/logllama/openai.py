@@ -28,6 +28,40 @@ CORRELATION_FIELDS = {
     "prompt_version",
 }
 
+MODEL_PARAMETER_FIELDS = {
+    "candidate_count",
+    "frequency_penalty",
+    "logprobs",
+    "max_completion_tokens",
+    "max_output_tokens",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "response_logprobs",
+    "response_mime_type",
+    "seed",
+    "stop",
+    "stop_sequences",
+    "temperature",
+    "text",
+    "thinking_config",
+    "top_k",
+    "top_logprobs",
+    "top_p",
+}
+MODEL_PARAMETER_CONTAINERS = ("config", "generation_config")
+PROVIDER_REQUEST_ID_HEADERS = (
+    "x-request-id",
+    "request-id",
+    "x-goog-request-id",
+)
+RETRY_COUNT_HEADERS = (
+    "x-stainless-retry-count",
+    "x-retry-count",
+    "grpc-previous-rpc-attempts",
+)
+
 
 def wrap_openai(openai_client: Any, **kwargs: Any) -> Any:
     return instrument_openai(openai_client, **kwargs)
@@ -111,6 +145,8 @@ def _wrap_call(original: Callable[..., Any], operation: str, config: LogLlamaCon
         model = kwargs.get("model")
         logllama_metadata = kwargs.pop("logllama_metadata", None)
         prompt = _prepare_capture(_extract_prompt(operation, kwargs), config, "prompt")
+        model_parameters = _extract_model_parameters(kwargs, config)
+        explicit_retry_count = _metadata_retry_count(logllama_metadata)
         metadata = _build_event_metadata(config, kwargs, external_id, logllama_metadata)
         should_capture_success = _should_capture(config, metadata)
 
@@ -131,6 +167,9 @@ def _wrap_call(original: Callable[..., Any], operation: str, config: LogLlamaCon
                         "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                         "latency_ms": monotonic_ms(start),
                         "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                        "provider_request_id": _extract_provider_request_id(exc),
+                        "retry_count": _extract_retry_count(exc, explicit_retry_count),
+                        "model_parameters": model_parameters,
                         **metadata,
                         "captured_at": now_iso(),
                     },
@@ -156,6 +195,9 @@ def _wrap_call(original: Callable[..., Any], operation: str, config: LogLlamaCon
                 "usage": usage,
                 "latency_ms": monotonic_ms(start),
                 "error": None,
+                "provider_request_id": _extract_provider_request_id(response),
+                "retry_count": _extract_retry_count(response, explicit_retry_count),
+                "model_parameters": model_parameters,
                 **metadata,
                 "captured_at": now_iso(),
             },
@@ -182,6 +224,109 @@ def _extract_request_metadata(kwargs: dict[str, Any], logllama_metadata: Any = N
     return metadata
 
 
+def _extract_model_parameters(
+    kwargs: dict[str, Any],
+    config: LogLlamaConfig,
+) -> dict[str, Any]:
+    parameters = {
+        key: safe_json(value)
+        for key, value in kwargs.items()
+        if key in MODEL_PARAMETER_FIELDS and value is not None
+    }
+    for container_name in MODEL_PARAMETER_CONTAINERS:
+        container = safe_json(kwargs.get(container_name))
+        if not isinstance(container, dict):
+            continue
+        for key, value in container.items():
+            if key in MODEL_PARAMETER_FIELDS and value is not None:
+                parameters[key] = safe_json(value)
+    return _remove_none_values(_redact_value(parameters, config))
+
+
+def _remove_none_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _remove_none_values(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_remove_none_values(item) for item in value if item is not None]
+    return value
+
+
+def _extract_provider_request_id(value: Any) -> str | None:
+    for name in ("_request_id", "request_id", "response_id"):
+        request_id = _read_value(value, name)
+        if request_id:
+            return str(request_id)
+    headers = _response_headers(value)
+    for name in PROVIDER_REQUEST_ID_HEADERS:
+        request_id = headers.get(name)
+        if request_id:
+            return str(request_id)
+    return None
+
+
+def _extract_retry_count(value: Any, explicit_retry_count: int | None = None) -> int:
+    if explicit_retry_count is not None:
+        return explicit_retry_count
+    for name in ("retry_count", "retries_taken"):
+        retry_count = _nonnegative_int(_read_value(value, name))
+        if retry_count is not None:
+            return retry_count
+    headers = _response_headers(value)
+    for name in RETRY_COUNT_HEADERS:
+        retry_count = _nonnegative_int(headers.get(name))
+        if retry_count is not None:
+            return retry_count
+    return 0
+
+
+def _metadata_retry_count(logllama_metadata: Any) -> int | None:
+    if not isinstance(logllama_metadata, dict):
+        return None
+    return _nonnegative_int(logllama_metadata.get("retry_count"))
+
+
+def _response_headers(value: Any) -> dict[str, Any]:
+    candidates = [
+        _read_value(value, "headers"),
+        _read_value(_read_value(value, "sdk_http_response"), "headers"),
+        _read_value(_read_value(value, "http_response"), "headers"),
+        _read_value(_read_value(value, "response"), "headers"),
+        _read_value(_read_value(value, "_response"), "headers"),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            return {str(key).lower(): item for key, item in dict(candidate).items()}
+        except (TypeError, ValueError):
+            continue
+    return {}
+
+
+def _read_value(value: Any, name: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(name)
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_event_metadata(
     config: LogLlamaConfig,
     kwargs: dict[str, Any],
@@ -202,6 +347,7 @@ def _build_event_metadata(
     merged.update(get_context_metadata())
     merged.update(_extract_request_metadata(kwargs, logllama_metadata))
     merged.update(_extract_otel_ids(config))
+    merged.pop("retry_count", None)
 
     normalized = _filter_metadata(_redact_value(merged, config), config)
     custom_metadata = normalized.pop("custom_metadata", {})
@@ -360,7 +506,7 @@ def _extract_otel_ids(config: LogLlamaConfig) -> dict[str, str]:
 
 
 def _extract_response_model(response: Any) -> str | None:
-    model = getattr(response, "model", None)
+    model = getattr(response, "model", None) or getattr(response, "model_version", None)
     if model:
         return str(model)
     if isinstance(response, dict) and response.get("model"):

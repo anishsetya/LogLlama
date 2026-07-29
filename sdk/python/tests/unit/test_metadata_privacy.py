@@ -15,6 +15,8 @@ class _Usage:
 class _Response:
     model = "gpt-test"
     usage = _Usage()
+    _request_id = "openai-request-123"
+    retries_taken = 1
 
     def model_dump(self) -> dict[str, Any]:
         return {
@@ -84,6 +86,8 @@ def test_sdk_captures_realistic_metadata_and_privacy_controls(monkeypatch) -> No
             metadata={
                 "provider_metadata": "openai-safe",
             },
+            temperature=0.3,
+            max_tokens=32,
             logllama_metadata={
                 "tags": ["recommendations"],
                 "custom_metadata": {"experiment": "metadata-capture-v1"},
@@ -109,4 +113,7 @@ def test_sdk_captures_realistic_metadata_and_privacy_controls(monkeypatch) -> No
     assert event["prompt"]["_logllama_capture"] == "truncated"
     assert event["response"]["api_key"] == "[REDACTED]"
     assert event["usage"] == {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+    assert event["provider_request_id"] == "openai-request-123"
+    assert event["retry_count"] == 1
+    assert event["model_parameters"] == {"temperature": 0.3, "max_tokens": 32}
     assert "logllama_metadata" not in client.chat.completions.received_kwargs

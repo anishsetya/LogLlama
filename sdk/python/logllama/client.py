@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 from urllib import request
 
@@ -20,6 +21,8 @@ def monotonic_ms(start: float) -> int:
 
 
 def safe_json(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return safe_json(value.value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, (list, tuple)):
@@ -64,4 +67,3 @@ def _post_event(config: LogLlamaConfig, event: dict[str, Any]) -> None:
 
 def new_external_id() -> str:
     return f"llreq_{uuid.uuid4().hex}"
-

@@ -9,8 +9,12 @@ from .client import monotonic_ms, new_external_id, now_iso, post_event_async
 from .config import LogLlamaConfig, get_config
 from .openai import (
     _build_event_metadata,
+    _extract_model_parameters,
+    _extract_provider_request_id,
     _extract_response_model,
+    _extract_retry_count,
     _extract_usage,
+    _metadata_retry_count,
     _prepare_capture,
     _should_capture,
 )
@@ -67,16 +71,48 @@ def _wrap_async(
 ) -> Callable[..., Any]:
     @functools.wraps(original)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        external_id, start, model, prompt, metadata, should_capture = _before_call(
+        (
+            external_id,
+            start,
+            model,
+            prompt,
+            model_parameters,
+            explicit_retry_count,
+            metadata,
+            should_capture,
+        ) = _before_call(
             kwargs, operation, prompt_keys, config
         )
         try:
             response = await original(*args, **kwargs)
         except Exception as exc:
-            _capture_error(config, external_id, provider, operation, model, prompt, metadata, start, exc)
+            _capture_error(
+                config,
+                external_id,
+                provider,
+                operation,
+                model,
+                prompt,
+                model_parameters,
+                explicit_retry_count,
+                metadata,
+                start,
+                exc,
+            )
             raise
         _capture_success(
-            config, external_id, provider, operation, model, prompt, metadata, start, response, should_capture
+            config,
+            external_id,
+            provider,
+            operation,
+            model,
+            prompt,
+            model_parameters,
+            explicit_retry_count,
+            metadata,
+            start,
+            response,
+            should_capture,
         )
         return response
 
@@ -93,16 +129,48 @@ def _invoke_sync(
     prompt_keys: tuple[str, ...],
     config: LogLlamaConfig,
 ) -> Any:
-    external_id, start, model, prompt, metadata, should_capture = _before_call(
+    (
+        external_id,
+        start,
+        model,
+        prompt,
+        model_parameters,
+        explicit_retry_count,
+        metadata,
+        should_capture,
+    ) = _before_call(
         kwargs, operation, prompt_keys, config
     )
     try:
         response = original(*args, **kwargs)
     except Exception as exc:
-        _capture_error(config, external_id, provider, operation, model, prompt, metadata, start, exc)
+        _capture_error(
+            config,
+            external_id,
+            provider,
+            operation,
+            model,
+            prompt,
+            model_parameters,
+            explicit_retry_count,
+            metadata,
+            start,
+            exc,
+        )
         raise
     _capture_success(
-        config, external_id, provider, operation, model, prompt, metadata, start, response, should_capture
+        config,
+        external_id,
+        provider,
+        operation,
+        model,
+        prompt,
+        model_parameters,
+        explicit_retry_count,
+        metadata,
+        start,
+        response,
+        should_capture,
     )
     return response
 
@@ -112,15 +180,26 @@ def _before_call(
     operation: str,
     prompt_keys: tuple[str, ...],
     config: LogLlamaConfig,
-) -> tuple[str, float, Any, Any, dict[str, Any], bool]:
+) -> tuple[str, float, Any, Any, dict[str, Any], int | None, dict[str, Any], bool]:
     external_id = new_external_id()
     start = time.perf_counter()
     model = kwargs.get("model")
     logllama_metadata = kwargs.pop("logllama_metadata", None)
     prompt_value = next((kwargs.get(key) for key in prompt_keys if kwargs.get(key) is not None), None)
     prompt = _prepare_capture(prompt_value, config, "prompt")
+    model_parameters = _extract_model_parameters(kwargs, config)
+    explicit_retry_count = _metadata_retry_count(logllama_metadata)
     metadata = _build_event_metadata(config, kwargs, external_id, logllama_metadata)
-    return external_id, start, model, prompt, metadata, _should_capture(config, metadata)
+    return (
+        external_id,
+        start,
+        model,
+        prompt,
+        model_parameters,
+        explicit_retry_count,
+        metadata,
+        _should_capture(config, metadata),
+    )
 
 
 def _capture_error(
@@ -130,6 +209,8 @@ def _capture_error(
     operation: str,
     model: Any,
     prompt: Any,
+    model_parameters: dict[str, Any],
+    explicit_retry_count: int | None,
     metadata: dict[str, Any],
     start: float,
     exc: Exception,
@@ -149,6 +230,9 @@ def _capture_error(
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             "latency_ms": monotonic_ms(start),
             "error": {"type": exc.__class__.__name__, "message": str(exc)},
+            "provider_request_id": _extract_provider_request_id(exc),
+            "retry_count": _extract_retry_count(exc, explicit_retry_count),
+            "model_parameters": model_parameters,
             **metadata,
             "captured_at": now_iso(),
         },
@@ -162,6 +246,8 @@ def _capture_success(
     operation: str,
     model: Any,
     prompt: Any,
+    model_parameters: dict[str, Any],
+    explicit_retry_count: int | None,
     metadata: dict[str, Any],
     start: float,
     response: Any,
@@ -182,6 +268,9 @@ def _capture_success(
             "usage": _extract_usage(response),
             "latency_ms": monotonic_ms(start),
             "error": None,
+            "provider_request_id": _extract_provider_request_id(response),
+            "retry_count": _extract_retry_count(response, explicit_retry_count),
+            "model_parameters": model_parameters,
             **metadata,
             "captured_at": now_iso(),
         },

@@ -299,6 +299,8 @@ function RequestDetail({ request }) {
             { label: "Environment", value: request.environment },
             { label: "Version", value: request.version },
             { label: "Git SHA", value: request.git_sha, mono: true },
+            { label: "Provider request", value: request.provider_request_id, mono: true },
+            { label: "Attempts", value: Number(request.retry_count || 0) + 1 },
             { label: "Prompt", value: request.prompt_template },
             { label: "Prompt version", value: request.prompt_version },
           ]}
@@ -323,6 +325,7 @@ function RequestDetail({ request }) {
 
       <JsonBlock title="Prompt" value={request.prompt} defaultOpen />
       <JsonBlock title="Response" value={request.response} />
+      <JsonBlock title="Model Parameters" value={request.model_parameters || {}} />
       <JsonBlock title="Custom Metadata" value={request.custom_metadata || {}} />
     </aside>
   );
@@ -788,7 +791,7 @@ function App() {
               </div>
               <label className="search">
                 <Search size={15} />
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search like GCP: trace, tenant, route, model, prompt" />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search trace, provider ID, tenant, route, model, prompt" />
               </label>
             </div>
 
