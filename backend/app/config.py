@@ -6,8 +6,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://logllama:logllama@localhost:5432/logllama"
 DEFAULT_API_KEY = "llama-dev-key"
-DEFAULT_RUNTIME_KEY = "llama-runtime-key"
+DEFAULT_RUNTIME_KEY = None
 DEFAULT_PROJECT_NAME = "Development"
+MIN_PRIVILEGED_KEY_LENGTH = 32
+LEGACY_RUNTIME_KEYS = frozenset({"llama-runtime-key"})
+LEGACY_ADMIN_KEYS = frozenset({"llama-admin-key"})
+
+
+def is_secure_privileged_key(value: str | None) -> bool:
+    return bool(
+        value
+        and len(value) >= MIN_PRIVILEGED_KEY_LENGTH
+        and value not in LEGACY_RUNTIME_KEYS
+        and value not in LEGACY_ADMIN_KEYS
+    )
 
 
 class Settings(BaseSettings):
@@ -16,11 +28,11 @@ class Settings(BaseSettings):
         validation_alias="DATABASE_URL",
     )
     default_api_key: str = Field(default=DEFAULT_API_KEY, validation_alias="LOGLLAMA_DEFAULT_API_KEY")
-    default_runtime_key: str = Field(
+    default_runtime_key: str | None = Field(
         default=DEFAULT_RUNTIME_KEY, validation_alias="LOGLLAMA_DEFAULT_RUNTIME_KEY"
     )
     default_project_name: str = Field(default=DEFAULT_PROJECT_NAME, validation_alias="LOGLLAMA_DEFAULT_PROJECT_NAME")
-    admin_api_key: str = Field(default="llama-admin-key", validation_alias="LOGLLAMA_ADMIN_API_KEY")
+    admin_api_key: str | None = Field(default=None, validation_alias="LOGLLAMA_ADMIN_API_KEY")
     secret_backend: str = Field(default="memory", validation_alias="LOGLLAMA_SECRET_BACKEND")
     secret_prefix: str = Field(default="logllama", validation_alias="LOGLLAMA_SECRET_PREFIX")
     aws_region: str | None = Field(default=None, validation_alias="AWS_REGION")
@@ -75,7 +87,6 @@ class Settings(BaseSettings):
     @field_validator(
         "database_url",
         "default_api_key",
-        "default_runtime_key",
         "default_project_name",
         mode="before",
     )
@@ -86,10 +97,36 @@ class Settings(BaseSettings):
         defaults = {
             "database_url": DEFAULT_DATABASE_URL,
             "default_api_key": DEFAULT_API_KEY,
-            "default_runtime_key": DEFAULT_RUNTIME_KEY,
             "default_project_name": DEFAULT_PROJECT_NAME,
         }
         return defaults[info.field_name]
+
+    @field_validator("default_runtime_key", "admin_api_key", mode="before")
+    @classmethod
+    def privileged_keys_must_be_explicit_and_strong(cls, value: Any, info):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        legacy_values = (
+            LEGACY_RUNTIME_KEYS
+            if info.field_name == "default_runtime_key"
+            else LEGACY_ADMIN_KEYS
+        )
+        if not normalized or normalized in legacy_values:
+            return None
+        if len(normalized) < MIN_PRIVILEGED_KEY_LENGTH:
+            environment_name = (
+                "LOGLLAMA_DEFAULT_RUNTIME_KEY"
+                if info.field_name == "default_runtime_key"
+                else "LOGLLAMA_ADMIN_API_KEY"
+            )
+            raise ValueError(
+                f"{environment_name} must contain at least "
+                f"{MIN_PRIVILEGED_KEY_LENGTH} characters."
+            )
+        return normalized
 
     @field_validator("secret_backend")
     @classmethod

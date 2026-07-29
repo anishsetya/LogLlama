@@ -14,6 +14,7 @@ import {
   GitCommit,
   KeyRound,
   ListTree,
+  LockKeyhole,
   RefreshCw,
   Search,
   Server,
@@ -25,7 +26,6 @@ import {
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-const ADMIN_KEY = import.meta.env.VITE_LOGLLAMA_ADMIN_KEY || "llama-admin-key";
 const DEFAULT_RANGE = { amount: 24, unit: "hours" };
 const RANGE_PRESETS = [
   { label: "5m", minutes: 5 },
@@ -328,24 +328,87 @@ function RequestDetail({ request }) {
   );
 }
 
-async function adminFetch(path, options = {}) {
+async function adminFetch(path, adminKey, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "X-LogLlama-Admin-Key": ADMIN_KEY,
+      "X-LogLlama-Admin-Key": adminKey,
       ...(options.headers || {}),
     },
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || `Admin API returned ${response.status}`);
+    const error = new Error(payload.detail || `Admin API returned ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) return null;
   return response.json();
 }
 
-function ProviderCredentialsAdmin() {
+function AdminAccessForm({ onUnlock, initialError }) {
+  const [candidate, setCandidate] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(initialError || "");
+
+  const unlock = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await onUnlock(candidate);
+    } catch (err) {
+      setError(err.message || "Unable to verify administrator access");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="adminUnlock">
+      <div>
+        <span className="eyebrow">Restricted</span>
+        <h2>Administrator access</h2>
+        <p>Enter the administrator key for this session.</p>
+      </div>
+      <form onSubmit={unlock}>
+        <label>
+          <span>Administrator key</span>
+          <input
+            type="password"
+            value={candidate}
+            onChange={(event) => setCandidate(event.target.value)}
+            minLength="32"
+            autoComplete="current-password"
+            autoFocus
+            required
+          />
+        </label>
+        <button className="primaryCommand" type="submit" disabled={busy || candidate.length < 32}>
+          <LockKeyhole size={16} />
+          <span>{busy ? "Verifying" : "Unlock"}</span>
+        </button>
+      </form>
+      {error && <div className="banner">{error}</div>}
+    </section>
+  );
+}
+
+function AdminHeaderActions({ onRefresh, onLock }) {
+  return (
+    <div className="adminHeaderActions">
+      <button className="iconCommand" type="button" onClick={onRefresh} aria-label="Refresh" title="Refresh">
+        <RefreshCw size={16} />
+      </button>
+      <button className="iconCommand" type="button" onClick={onLock} aria-label="Lock admin session" title="Lock admin session">
+        <LockKeyhole size={16} />
+      </button>
+    </div>
+  );
+}
+
+function ProviderCredentialsAdmin({ adminKey, onUnauthorized, onLock }) {
   const [credentials, setCredentials] = React.useState([]);
   const [backend, setBackend] = React.useState("");
   const [provider, setProvider] = React.useState("openai");
@@ -356,14 +419,18 @@ function ProviderCredentialsAdmin() {
 
   const load = React.useCallback(async () => {
     try {
-      const payload = await adminFetch("/api/admin/provider-credentials");
+      const payload = await adminFetch("/api/admin/provider-credentials", adminKey);
       setCredentials(payload.credentials || []);
       setBackend(payload.secret_backend || "");
       setError("");
     } catch (err) {
+      if (err.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setError(err.message || "Unable to load provider credentials");
     }
-  }, []);
+  }, [adminKey, onUnauthorized]);
 
   React.useEffect(() => {
     load();
@@ -374,13 +441,17 @@ function ProviderCredentialsAdmin() {
     setBusy(true);
     setError("");
     try {
-      await adminFetch("/api/admin/provider-credentials", {
+      await adminFetch("/api/admin/provider-credentials", adminKey, {
         method: "POST",
         body: JSON.stringify({ provider, name, api_key: apiKey }),
       });
       setApiKey("");
       await load();
     } catch (err) {
+      if (err.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setError(err.message || "Unable to save credential");
     } finally {
       setBusy(false);
@@ -391,9 +462,13 @@ function ProviderCredentialsAdmin() {
     if (!window.confirm(`Remove the ${credential.provider} credential "${credential.name}"?`)) return;
     setBusy(true);
     try {
-      await adminFetch(`/api/admin/provider-credentials/${credential.id}`, { method: "DELETE" });
+      await adminFetch(`/api/admin/provider-credentials/${credential.id}`, adminKey, { method: "DELETE" });
       await load();
     } catch (err) {
+      if (err.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setError(err.message || "Unable to remove credential");
     } finally {
       setBusy(false);
@@ -409,9 +484,7 @@ function ProviderCredentialsAdmin() {
           <h2>Provider credentials</h2>
           <p>Keys are write-only here. The database keeps a reference and fingerprint, not the key value.</p>
         </div>
-        <button className="iconCommand" type="button" onClick={load} aria-label="Refresh credentials" title="Refresh credentials">
-          <RefreshCw size={16} />
-        </button>
+        <AdminHeaderActions onRefresh={load} onLock={onLock} />
       </div>
 
       <form className="credentialForm" onSubmit={save}>
@@ -459,20 +532,24 @@ function ProviderCredentialsAdmin() {
   );
 }
 
-function TestPlansAdmin() {
+function TestPlansAdmin({ adminKey, onUnauthorized, onLock }) {
   const [plans, setPlans] = React.useState([]);
   const [busyId, setBusyId] = React.useState("");
   const [error, setError] = React.useState("");
 
   const load = React.useCallback(async () => {
     try {
-      const payload = await adminFetch("/api/admin/test-plans");
+      const payload = await adminFetch("/api/admin/test-plans", adminKey);
       setPlans(payload.test_plans || []);
       setError("");
     } catch (err) {
+      if (err.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setError(err.message || "Unable to load test plans");
     }
-  }, []);
+  }, [adminKey, onUnauthorized]);
 
   React.useEffect(() => {
     load();
@@ -481,7 +558,7 @@ function TestPlansAdmin() {
   const decide = async (plan, decision) => {
     setBusyId(plan.id);
     try {
-      await adminFetch(`/api/admin/test-plans/${plan.id}/${decision}`, {
+      await adminFetch(`/api/admin/test-plans/${plan.id}/${decision}`, adminKey, {
         method: "POST",
         body: JSON.stringify({
           expires_in_hours: 24,
@@ -490,6 +567,10 @@ function TestPlansAdmin() {
       });
       await load();
     } catch (err) {
+      if (err.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setError(err.message || `Unable to ${decision} test plan`);
     } finally {
       setBusyId("");
@@ -505,9 +586,7 @@ function TestPlansAdmin() {
           <h2>Provider comparison approvals</h2>
           <p>Approval applies to the exact prompt, provider/model targets, and output limit shown below.</p>
         </div>
-        <button className="iconCommand" type="button" onClick={load} aria-label="Refresh test plans" title="Refresh test plans">
-          <RefreshCw size={16} />
-        </button>
+        <AdminHeaderActions onRefresh={load} onLock={onLock} />
       </div>
 
       <div className="testPlanList">
@@ -552,6 +631,8 @@ function TestPlansAdmin() {
 
 function App() {
   const [view, setView] = React.useState("traces");
+  const [adminKey, setAdminKey] = React.useState("");
+  const [adminError, setAdminError] = React.useState("");
   const [summary, setSummary] = React.useState(null);
   const [requests, setRequests] = React.useState([]);
   const [facets, setFacets] = React.useState({});
@@ -634,6 +715,19 @@ function App() {
   };
   const rangeMinutes = toMinutes(timeRange);
   const rangeLabel = formatRangeLabel(rangeMinutes);
+  const unlockAdmin = React.useCallback(async (candidate) => {
+    await adminFetch("/api/admin/provider-credentials", candidate);
+    setAdminKey(candidate);
+    setAdminError("");
+  }, []);
+  const lockAdmin = React.useCallback(() => {
+    setAdminKey("");
+    setAdminError("");
+  }, []);
+  const rejectAdminSession = React.useCallback(() => {
+    setAdminKey("");
+    setAdminError("Administrator access was rejected. Enter the current key.");
+  }, []);
 
   return (
     <main className="appShell">
@@ -738,8 +832,16 @@ function App() {
             </section>
           </>
         )}
-        {view === "credentials" && <ProviderCredentialsAdmin />}
-        {view === "tests" && <TestPlansAdmin />}
+        {view === "credentials" && (
+          adminKey
+            ? <ProviderCredentialsAdmin adminKey={adminKey} onUnauthorized={rejectAdminSession} onLock={lockAdmin} />
+            : <AdminAccessForm onUnlock={unlockAdmin} initialError={adminError} />
+        )}
+        {view === "tests" && (
+          adminKey
+            ? <TestPlansAdmin adminKey={adminKey} onUnauthorized={rejectAdminSession} onLock={lockAdmin} />
+            : <AdminAccessForm onUnlock={unlockAdmin} initialError={adminError} />
+        )}
       </section>
     </main>
   );

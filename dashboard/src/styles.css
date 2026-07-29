@@ -628,6 +628,62 @@ h3 {
   gap: 12px;
 }
 
+.adminUnlock {
+  display: grid;
+  gap: 18px;
+  padding: 28px 0;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.adminUnlock h2 {
+  margin-top: 5px;
+  font-size: 1.15rem;
+}
+
+.adminUnlock p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.adminUnlock form {
+  display: grid;
+  grid-template-columns: minmax(240px, 440px) auto;
+  gap: 9px;
+  align-items: end;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.adminUnlock label {
+  display: grid;
+  gap: 5px;
+}
+
+.adminUnlock label > span {
+  color: var(--muted-soft);
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.adminUnlock input {
+  width: 100%;
+  height: 36px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: 0;
+  color: var(--text);
+  background: #0b1117;
+}
+
+.adminUnlock input:focus {
+  border-color: rgba(138, 223, 159, 0.58);
+  box-shadow: 0 0 0 2px rgba(138, 223, 159, 0.08);
+}
+
 .adminIntro {
   display: flex;
   align-items: flex-start;
@@ -636,6 +692,11 @@ h3 {
   padding: 14px 0;
   border-top: 1px solid var(--border-soft);
   border-bottom: 1px solid var(--border-soft);
+}
+
+.adminHeaderActions {
+  display: flex;
+  gap: 7px;
 }
 
 .adminIntro h2 {
@@ -1142,6 +1203,10 @@ pre {
   .credentialForm {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .adminUnlock form {
+    width: 100%;
+  }
 }
 
 @media (max-width: 780px) {
@@ -1235,6 +1300,7 @@ pre {
   }
 
   .viewTabs,
+  .adminUnlock form,
   .credentialForm,
   .credentialColumns {
     grid-template-columns: 1fr;

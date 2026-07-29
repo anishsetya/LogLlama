@@ -2,9 +2,10 @@ from app.config import (
     DEFAULT_API_KEY,
     DEFAULT_DATABASE_URL,
     DEFAULT_PROJECT_NAME,
-    DEFAULT_RUNTIME_KEY,
+    MIN_PRIVILEGED_KEY_LENGTH,
     Settings,
 )
+from pydantic import ValidationError
 import pytest
 
 
@@ -18,8 +19,48 @@ def test_blank_environment_values_fall_back_to_dev_defaults(monkeypatch):
 
     assert settings.database_url == DEFAULT_DATABASE_URL
     assert settings.default_api_key == DEFAULT_API_KEY
-    assert settings.default_runtime_key == DEFAULT_RUNTIME_KEY
+    assert settings.default_runtime_key is None
     assert settings.default_project_name == DEFAULT_PROJECT_NAME
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "legacy_value", "field_name"),
+    [
+        ("LOGLLAMA_DEFAULT_RUNTIME_KEY", "llama-runtime-key", "default_runtime_key"),
+        ("LOGLLAMA_ADMIN_API_KEY", "llama-admin-key", "admin_api_key"),
+    ],
+)
+def test_legacy_privileged_keys_disable_feature(
+    monkeypatch, environment_name, legacy_value, field_name
+):
+    monkeypatch.setenv(environment_name, legacy_value)
+
+    configured = Settings()
+
+    assert getattr(configured, field_name) is None
+
+
+@pytest.mark.parametrize(
+    "environment_name",
+    ["LOGLLAMA_DEFAULT_RUNTIME_KEY", "LOGLLAMA_ADMIN_API_KEY"],
+)
+def test_short_privileged_keys_are_rejected(monkeypatch, environment_name):
+    monkeypatch.setenv(environment_name, "short-custom-key")
+
+    with pytest.raises(ValidationError, match="must contain at least"):
+        Settings()
+
+
+def test_strong_privileged_keys_are_accepted(monkeypatch):
+    runtime_key = "r" * MIN_PRIVILEGED_KEY_LENGTH
+    admin_key = "a" * MIN_PRIVILEGED_KEY_LENGTH
+    monkeypatch.setenv("LOGLLAMA_DEFAULT_RUNTIME_KEY", runtime_key)
+    monkeypatch.setenv("LOGLLAMA_ADMIN_API_KEY", admin_key)
+
+    configured = Settings()
+
+    assert configured.default_runtime_key == runtime_key
+    assert configured.admin_api_key == admin_key
 
 
 @pytest.mark.parametrize("backend", ["memory", "aws", "vault", "openbao"])

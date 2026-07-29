@@ -6,13 +6,13 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Select, case, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import settings
+from .config import is_secure_privileged_key, settings
 from .database import Base, engine, get_session
 from .models import LLMRequest, Project, ProviderCredential, TestPlan
 from .pricing import estimate_cost_usd
@@ -70,8 +70,10 @@ async def lifespan(app: FastAPI):
                 runtime_key=settings.default_runtime_key,
             )
             session.add(project)
-        elif not project.runtime_key:
+        elif settings.default_runtime_key:
             project.runtime_key = settings.default_runtime_key
+        elif project.runtime_key and not is_secure_privileged_key(project.runtime_key):
+            project.runtime_key = None
         await session.commit()
 
     yield
@@ -114,6 +116,8 @@ async def project_from_runtime_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing X-LogLlama-Runtime-Key header.",
         )
+    if not is_secure_privileged_key(x_logllama_runtime_key):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid runtime key.")
     result = await session.execute(
         select(Project).where(Project.runtime_key == x_logllama_runtime_key)
     )
@@ -126,6 +130,11 @@ async def project_from_runtime_key(
 async def require_admin(
     x_logllama_admin_key: str | None = Header(default=None),
 ) -> None:
+    if settings.admin_api_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin authentication is not configured.",
+        )
     if not x_logllama_admin_key or not hmac.compare_digest(
         x_logllama_admin_key, settings.admin_api_key
     ):
@@ -277,9 +286,12 @@ async def delete_provider_credential(
 
 @app.get("/v1/runtime/provider-credentials", response_model=RuntimeCredentialListOut)
 async def runtime_provider_credentials(
+    response: Response,
     project: Project = Depends(project_from_runtime_key),
     session: AsyncSession = Depends(get_session),
 ) -> RuntimeCredentialListOut:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     result = await session.execute(
         select(ProviderCredential).where(
             ProviderCredential.project_id == project.id,
