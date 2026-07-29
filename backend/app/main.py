@@ -1,7 +1,10 @@
+import asyncio
+import hashlib
+import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,9 +14,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .database import Base, engine, get_session
-from .models import LLMRequest, Project
+from .models import LLMRequest, Project, ProviderCredential, TestPlan
 from .pricing import estimate_cost_usd
-from .schemas import EventIn, MetadataFacetsOut, RequestListOut, RequestOut, SummaryOut
+from .schemas import (
+    EventIn,
+    MetadataFacetsOut,
+    ProviderCredentialCreate,
+    ProviderCredentialListOut,
+    ProviderCredentialOut,
+    RequestListOut,
+    RequestOut,
+    RuntimeCredentialListOut,
+    SummaryOut,
+    TestPlanCreate,
+    TestPlanDecision,
+    TestPlanListOut,
+    TestPlanOut,
+)
+from .secret_store import get_secret_store
 
 
 CORRELATION_FIELDS = (
@@ -46,8 +64,15 @@ async def lifespan(app: FastAPI):
         )
         project = result.scalar_one_or_none()
         if project is None:
-            session.add(Project(name=settings.default_project_name, api_key=settings.default_api_key))
-            await session.commit()
+            project = Project(
+                name=settings.default_project_name,
+                api_key=settings.default_api_key,
+                runtime_key=settings.default_runtime_key,
+            )
+            session.add(project)
+        elif not project.runtime_key:
+            project.runtime_key = settings.default_runtime_key
+        await session.commit()
 
     yield
 
@@ -80,6 +105,33 @@ async def project_from_api_key(
     return project
 
 
+async def project_from_runtime_key(
+    x_logllama_runtime_key: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> Project:
+    if not x_logllama_runtime_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing X-LogLlama-Runtime-Key header.",
+        )
+    result = await session.execute(
+        select(Project).where(Project.runtime_key == x_logllama_runtime_key)
+    )
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid runtime key.")
+    return project
+
+
+async def require_admin(
+    x_logllama_admin_key: str | None = Header(default=None),
+) -> None:
+    if not x_logllama_admin_key or not hmac.compare_digest(
+        x_logllama_admin_key, settings.admin_api_key
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin key.")
+
+
 async def default_project(session: AsyncSession) -> Project:
     result = await session.execute(select(Project).where(Project.api_key == settings.default_api_key))
     project = result.scalar_one_or_none()
@@ -90,6 +142,10 @@ async def default_project(session: AsyncSession) -> Project:
 
 async def ensure_metadata_columns(conn) -> None:
     statements = [
+        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS runtime_key VARCHAR(255)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_projects_runtime_key ON projects (runtime_key)",
+        "ALTER TABLE test_plans ADD COLUMN IF NOT EXISTS max_runs INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE test_plans ADD COLUMN IF NOT EXISTS run_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS service_name VARCHAR(160)",
         "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS environment VARCHAR(80)",
         "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS version VARCHAR(120)",
@@ -128,6 +184,271 @@ async def ensure_metadata_columns(conn) -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/admin/provider-credentials", response_model=ProviderCredentialListOut)
+async def list_provider_credentials(
+    _: None = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ProviderCredentialListOut:
+    project = await default_project(session)
+    result = await session.execute(
+        select(ProviderCredential)
+        .where(ProviderCredential.project_id == project.id)
+        .order_by(ProviderCredential.provider, ProviderCredential.name)
+    )
+    return ProviderCredentialListOut(
+        credentials=list(result.scalars()),
+        secret_backend=settings.secret_backend,
+    )
+
+
+@app.post(
+    "/api/admin/provider-credentials",
+    response_model=ProviderCredentialOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def save_provider_credential(
+    payload: ProviderCredentialCreate,
+    _: None = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> ProviderCredential:
+    project = await default_project(session)
+    result = await session.execute(
+        select(ProviderCredential).where(
+            ProviderCredential.project_id == project.id,
+            ProviderCredential.provider == payload.provider,
+        )
+    )
+    credential = result.scalar_one_or_none()
+    credential_id = credential.id if credential else uuid4()
+    secret_ref = (
+        credential.secret_ref
+        if credential
+        else f"{settings.secret_prefix}/{project.id}/{payload.provider}/{credential_id}"
+    )
+    await asyncio.to_thread(get_secret_store().put, secret_ref, payload.api_key)
+    fingerprint = hashlib.sha256(payload.api_key.encode("utf-8")).hexdigest()[:12]
+    now = datetime.now(timezone.utc)
+    if credential is None:
+        credential = ProviderCredential(
+            id=credential_id,
+            project_id=project.id,
+            provider=payload.provider,
+            name=payload.name,
+            secret_ref=secret_ref,
+            fingerprint=fingerprint,
+            version=1,
+            status="active",
+            updated_at=now,
+        )
+        session.add(credential)
+    else:
+        credential.name = payload.name
+        credential.fingerprint = fingerprint
+        credential.version += 1
+        credential.status = "active"
+        credential.updated_at = now
+    await session.commit()
+    await session.refresh(credential)
+    return credential
+
+
+@app.delete("/api/admin/provider-credentials/{credential_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_provider_credential(
+    credential_id: UUID,
+    _: None = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    project = await default_project(session)
+    result = await session.execute(
+        select(ProviderCredential).where(
+            ProviderCredential.id == credential_id,
+            ProviderCredential.project_id == project.id,
+        )
+    )
+    credential = result.scalar_one_or_none()
+    if credential is None:
+        raise HTTPException(status_code=404, detail="Provider credential not found.")
+    await asyncio.to_thread(get_secret_store().delete, credential.secret_ref)
+    await session.delete(credential)
+    await session.commit()
+
+
+@app.get("/v1/runtime/provider-credentials", response_model=RuntimeCredentialListOut)
+async def runtime_provider_credentials(
+    project: Project = Depends(project_from_runtime_key),
+    session: AsyncSession = Depends(get_session),
+) -> RuntimeCredentialListOut:
+    result = await session.execute(
+        select(ProviderCredential).where(
+            ProviderCredential.project_id == project.id,
+            ProviderCredential.status == "active",
+        ).order_by(ProviderCredential.updated_at.desc())
+    )
+    credentials_by_provider: dict[str, ProviderCredential] = {}
+    for credential in result.scalars():
+        credentials_by_provider.setdefault(credential.provider, credential)
+    credentials = list(credentials_by_provider.values())
+    values = await asyncio.gather(
+        *(asyncio.to_thread(get_secret_store().get, item.secret_ref) for item in credentials)
+    )
+    return RuntimeCredentialListOut(
+        credentials=[
+            {
+                "provider": item.provider,
+                "api_key": value,
+                "version": item.version,
+                "updated_at": item.updated_at,
+            }
+            for item, value in zip(credentials, values, strict=True)
+        ]
+    )
+
+
+@app.post("/v1/test-plans", response_model=TestPlanOut, status_code=status.HTTP_201_CREATED)
+async def create_test_plan(
+    payload: TestPlanCreate,
+    project: Project = Depends(project_from_api_key),
+    session: AsyncSession = Depends(get_session),
+) -> TestPlan:
+    targets = [
+        {
+            "provider": "anthropic" if target.provider == "claude" else target.provider,
+            "model": target.model,
+        }
+        for target in payload.targets
+    ]
+    if len({(target["provider"], target["model"]) for target in targets}) != len(targets):
+        raise HTTPException(status_code=422, detail="Test targets must be unique.")
+    plan = TestPlan(
+        project_id=project.id,
+        prompt=payload.prompt,
+        system=payload.system,
+        targets=targets,
+        max_output_tokens=payload.max_output_tokens,
+        max_runs=payload.max_runs,
+        status="pending",
+        requested_by=payload.requested_by,
+    )
+    session.add(plan)
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+@app.get("/v1/test-plans/{test_plan_id}", response_model=TestPlanOut)
+async def get_test_plan(
+    test_plan_id: UUID,
+    project: Project = Depends(project_from_api_key),
+    session: AsyncSession = Depends(get_session),
+) -> TestPlan:
+    result = await session.execute(
+        select(TestPlan).where(
+            TestPlan.id == test_plan_id,
+            TestPlan.project_id == project.id,
+        )
+    )
+    plan = result.scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Test plan not found.")
+    return plan
+
+
+@app.post("/v1/test-plans/{test_plan_id}/lease", response_model=TestPlanOut)
+async def lease_test_plan(
+    test_plan_id: UUID,
+    project: Project = Depends(project_from_api_key),
+    session: AsyncSession = Depends(get_session),
+) -> TestPlan:
+    result = await session.execute(
+        select(TestPlan)
+        .where(
+            TestPlan.id == test_plan_id,
+            TestPlan.project_id == project.id,
+        )
+        .with_for_update()
+    )
+    plan = result.scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Test plan not found.")
+    now = datetime.now(timezone.utc)
+    if plan.status != "approved":
+        raise HTTPException(status_code=409, detail=f"Test plan is {plan.status}.")
+    if plan.expires_at and plan.expires_at <= now:
+        raise HTTPException(status_code=409, detail="Test plan has expired.")
+    if plan.run_count >= plan.max_runs:
+        raise HTTPException(status_code=409, detail="Test plan has no remaining runs.")
+    plan.run_count += 1
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+@app.get("/api/admin/test-plans", response_model=TestPlanListOut)
+async def list_test_plans(
+    _: None = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> TestPlanListOut:
+    project = await default_project(session)
+    result = await session.execute(
+        select(TestPlan)
+        .where(TestPlan.project_id == project.id)
+        .order_by(TestPlan.created_at.desc())
+        .limit(100)
+    )
+    return TestPlanListOut(test_plans=list(result.scalars()))
+
+
+@app.post("/api/admin/test-plans/{test_plan_id}/approve", response_model=TestPlanOut)
+async def approve_test_plan(
+    test_plan_id: UUID,
+    payload: TestPlanDecision,
+    _: None = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> TestPlan:
+    plan = await _admin_test_plan(session, test_plan_id)
+    now = datetime.now(timezone.utc)
+    plan.status = "approved"
+    plan.approved_by = "admin"
+    plan.rejection_reason = None
+    plan.approved_at = now
+    plan.expires_at = now + timedelta(hours=payload.expires_in_hours)
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+@app.post("/api/admin/test-plans/{test_plan_id}/reject", response_model=TestPlanOut)
+async def reject_test_plan(
+    test_plan_id: UUID,
+    payload: TestPlanDecision,
+    _: None = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> TestPlan:
+    plan = await _admin_test_plan(session, test_plan_id)
+    plan.status = "rejected"
+    plan.approved_by = "admin"
+    plan.rejection_reason = payload.reason
+    plan.approved_at = None
+    plan.expires_at = None
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+async def _admin_test_plan(session: AsyncSession, test_plan_id: UUID) -> TestPlan:
+    project = await default_project(session)
+    result = await session.execute(
+        select(TestPlan).where(
+            TestPlan.id == test_plan_id,
+            TestPlan.project_id == project.id,
+        )
+    )
+    plan = result.scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Test plan not found.")
+    return plan
 
 
 @app.post("/v1/events", status_code=status.HTTP_202_ACCEPTED)

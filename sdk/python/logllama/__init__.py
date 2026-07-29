@@ -1,4 +1,23 @@
+from .anthropic import instrument_anthropic, track_anthropic, wrap_anthropic
 from .config import context, init
+from .gemini import instrument_gemini, track_gemini, wrap_gemini
 from .openai import instrument_openai, track_openai, wrap_openai
+from .router import ApprovalRequiredError, ComparisonResult, LLM, TestApprovalClient
 
-__all__ = ["init", "context", "wrap_openai", "track_openai", "instrument_openai"]
+__all__ = [
+    "ApprovalRequiredError",
+    "ComparisonResult",
+    "LLM",
+    "TestApprovalClient",
+    "context",
+    "init",
+    "instrument_anthropic",
+    "instrument_gemini",
+    "instrument_openai",
+    "track_anthropic",
+    "track_gemini",
+    "track_openai",
+    "wrap_anthropic",
+    "wrap_gemini",
+    "wrap_openai",
+]
