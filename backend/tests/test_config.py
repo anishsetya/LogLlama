@@ -80,3 +80,13 @@ def test_vault_conventional_environment_aliases(monkeypatch):
 
     assert settings.secret_store_addr == "http://vault.internal:8200"
     assert settings.secret_store_token == "test-token"
+
+
+def test_approle_file_settings(monkeypatch):
+    monkeypatch.setenv("LOGLLAMA_SECRET_STORE_ROLE_ID_FILE", "/run/secrets/role-id")
+    monkeypatch.setenv("LOGLLAMA_SECRET_STORE_SECRET_ID_FILE", "/run/secrets/secret-id")
+
+    settings = Settings()
+
+    assert settings.secret_store_role_id_file == "/run/secrets/role-id"
+    assert settings.secret_store_secret_id_file == "/run/secrets/secret-id"

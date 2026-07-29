@@ -141,6 +141,18 @@ async def require_admin(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin key.")
 
 
+def require_persistent_secret_store() -> None:
+    if settings.secret_backend == "memory" and not settings.allow_ephemeral_secrets:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Provider credential writes require a persistent secret backend. "
+                "Configure OpenBao, Vault, or AWS Secrets Manager. "
+                "Set LOGLLAMA_ALLOW_EPHEMERAL_SECRETS=true only for disposable development."
+            ),
+        )
+
+
 async def default_project(session: AsyncSession) -> Project:
     result = await session.execute(select(Project).where(Project.api_key == settings.default_api_key))
     project = result.scalar_one_or_none()
@@ -226,6 +238,7 @@ async def save_provider_credential(
     _: None = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> ProviderCredential:
+    require_persistent_secret_store()
     project = await default_project(session)
     result = await session.execute(
         select(ProviderCredential).where(

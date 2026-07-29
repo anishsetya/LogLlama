@@ -6,6 +6,7 @@ import statistics
 import time
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from app.secret_store import MemorySecretStore, SecretStore, VaultKvV2SecretStore
@@ -76,6 +77,8 @@ def main() -> None:
     parser.add_argument("--vault-token")
     parser.add_argument("--openbao-addr")
     parser.add_argument("--openbao-token")
+    parser.add_argument("--openbao-role-id-file")
+    parser.add_argument("--openbao-secret-id-file")
     parser.add_argument("--read-iterations", type=int, default=1000)
     parser.add_argument("--write-iterations", type=int, default=250)
     args = parser.parse_args()
@@ -88,11 +91,19 @@ def main() -> None:
                 VaultKvV2SecretStore(args.vault_addr, args.vault_token),
             )
         )
-    if args.openbao_addr and args.openbao_token:
+    if args.openbao_addr and (
+        args.openbao_token
+        or (args.openbao_role_id_file and args.openbao_secret_id_file)
+    ):
         stores.append(
             (
                 "openbao",
-                VaultKvV2SecretStore(args.openbao_addr, args.openbao_token),
+                VaultKvV2SecretStore(
+                    args.openbao_addr,
+                    args.openbao_token,
+                    role_id=_read_optional(args.openbao_role_id_file),
+                    secret_id=_read_optional(args.openbao_secret_id_file),
+                ),
             )
         )
 
@@ -101,6 +112,12 @@ def main() -> None:
         for name, store in stores
     ]
     print(json.dumps({"results": results}, indent=2))
+
+
+def _read_optional(file_name: str | None) -> str | None:
+    if not file_name:
+        return None
+    return Path(file_name).read_text(encoding="utf-8").strip()
 
 
 if __name__ == "__main__":

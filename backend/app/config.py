@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     default_project_name: str = Field(default=DEFAULT_PROJECT_NAME, validation_alias="LOGLLAMA_DEFAULT_PROJECT_NAME")
     admin_api_key: str | None = Field(default=None, validation_alias="LOGLLAMA_ADMIN_API_KEY")
     secret_backend: str = Field(default="memory", validation_alias="LOGLLAMA_SECRET_BACKEND")
+    allow_ephemeral_secrets: bool = Field(
+        default=False,
+        validation_alias="LOGLLAMA_ALLOW_EPHEMERAL_SECRETS",
+    )
     secret_prefix: str = Field(default="logllama", validation_alias="LOGLLAMA_SECRET_PREFIX")
     aws_region: str | None = Field(default=None, validation_alias="AWS_REGION")
     secret_store_addr: str = Field(
@@ -51,6 +55,26 @@ class Settings(BaseSettings):
             "VAULT_TOKEN",
             "BAO_TOKEN",
         ),
+    )
+    secret_store_token_file: str | None = Field(
+        default=None,
+        validation_alias="LOGLLAMA_SECRET_STORE_TOKEN_FILE",
+    )
+    secret_store_role_id: str | None = Field(
+        default=None,
+        validation_alias="LOGLLAMA_SECRET_STORE_ROLE_ID",
+    )
+    secret_store_role_id_file: str | None = Field(
+        default=None,
+        validation_alias="LOGLLAMA_SECRET_STORE_ROLE_ID_FILE",
+    )
+    secret_store_secret_id: str | None = Field(
+        default=None,
+        validation_alias="LOGLLAMA_SECRET_STORE_SECRET_ID",
+    )
+    secret_store_secret_id_file: str | None = Field(
+        default=None,
+        validation_alias="LOGLLAMA_SECRET_STORE_SECRET_ID_FILE",
     )
     secret_store_mount: str = Field(
         default="secret",

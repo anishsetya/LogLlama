@@ -36,3 +36,21 @@ def test_insecure_runtime_keys_are_rejected_before_database_lookup(runtime_key):
         run(main.project_from_runtime_key(runtime_key, object()))
 
     assert error.value.status_code == 401
+
+
+def test_provider_credential_writes_reject_ephemeral_store(monkeypatch):
+    monkeypatch.setattr(main.settings, "secret_backend", "memory")
+    monkeypatch.setattr(main.settings, "allow_ephemeral_secrets", False)
+
+    with pytest.raises(HTTPException) as error:
+        main.require_persistent_secret_store()
+
+    assert error.value.status_code == 503
+    assert "persistent secret backend" in error.value.detail
+
+
+def test_provider_credential_writes_allow_openbao(monkeypatch):
+    monkeypatch.setattr(main.settings, "secret_backend", "openbao")
+    monkeypatch.setattr(main.settings, "allow_ephemeral_secrets", False)
+
+    assert main.require_persistent_secret_store() is None

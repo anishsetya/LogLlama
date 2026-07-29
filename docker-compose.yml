@@ -15,6 +15,27 @@ services:
       timeout: 5s
       retries: 10
 
+  openbao:
+    image: quay.io/openbao/openbao:2.5.4
+    command: server
+    ports:
+      - "127.0.0.1:8200:8200"
+    volumes:
+      - openbao_data:/openbao/file
+      - ./deploy/openbao/openbao.hcl:/openbao/config/openbao.hcl:ro
+      - ./deploy/openbao/logllama-policy.hcl:/openbao/policies/logllama-policy.hcl:ro
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - --quiet
+        - http://127.0.0.1:8200/v1/sys/health?standbyok=true
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
 volumes:
   postgres_data:
-
+  openbao_data:
