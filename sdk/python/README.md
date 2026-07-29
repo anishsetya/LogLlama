@@ -16,6 +16,95 @@ client = logllama.wrap_openai(OpenAI())
 
 Every supported OpenAI call made through `client` is captured automatically.
 
+Anthropic and Gemini native clients use the same pattern:
+
+```python
+anthropic_client = logllama.wrap_anthropic(Anthropic())
+gemini_client = logllama.wrap_gemini(genai.Client())
+```
+
+## Provider Switching
+
+Use the normalized client when the provider should be selected per request:
+
+```python
+llm = logllama.LLM(
+    openai=openai_client,
+    anthropic=anthropic_client,
+    gemini=gemini_client,
+    models={
+        "openai": "gpt-model",
+        "anthropic": "claude-model",
+        "gemini": "gemini-model",
+    },
+)
+
+response = llm.generate(
+    "Summarize this support ticket.",
+    provider="anthropic",  # "claude" is accepted as an alias
+    max_output_tokens=200,
+)
+
+print(response.text)
+print(response.usage)
+print(response.raw)
+```
+
+Provider packages are optional:
+
+```bash
+pip install "logllama[openai]"
+pip install "logllama[anthropic]"
+pip install "logllama[gemini]"
+pip install "logllama[all]"
+```
+
+## Approved Comparison Tests
+
+Comparison mode cannot call providers until the exact prompt, models, and output limit are approved in the admin portal:
+
+```python
+approvals = logllama.TestApprovalClient(
+    endpoint="http://localhost:8000",
+    api_key="YOUR_LOGLLAMA_KEY",
+)
+llm.approval_client = approvals
+
+plan = llm.request_test(
+    prompt="Reply with only: ok",
+    targets=[
+        ("openai", "gpt-model"),
+        ("anthropic", "claude-model"),
+        ("gemini", "gemini-model"),
+    ],
+    max_output_tokens=16,
+    max_runs=1,
+)
+
+# After an administrator approves plan["id"]:
+results = llm.compare(test_plan_id=plan["id"])
+```
+
+Targets run concurrently and share a `comparison_id` in telemetry.
+
+## Managed Credentials
+
+Managed keys are preloaded before the client is returned and refreshed on a background thread:
+
+```python
+llm = logllama.LLM.from_managed(
+    models={
+        "openai": "gpt-model",
+        "anthropic": "claude-model",
+        "gemini": "gemini-model",
+    },
+    endpoint="http://localhost:8000",
+    runtime_key="YOUR_LOGLLAMA_RUNTIME_KEY",
+)
+```
+
+The normal `generate()` path reads an already-built provider adapter and performs no LogLlama or secret-manager network request. Call `llm.close()` during application shutdown.
+
 ```python
 client.chat.completions.create(
     model="gpt-4o-mini",
