@@ -9,6 +9,7 @@ from urllib import parse, request
 import pytest
 
 import logllama
+from logllama.config import load_dotenv
 
 
 pytestmark = pytest.mark.integration
@@ -16,6 +17,7 @@ pytestmark = pytest.mark.integration
 
 MODEL = os.getenv("LOGLLAMA_OPENAI_TEST_MODEL", "gpt-5-nano")
 RUN_FLAG = "RUN_LOGLLAMA_OPENAI_INTEGRATION"
+SUCCESS_RUNS_ENV = "LOGLLAMA_OPENAI_SUCCESS_RUNS"
 
 
 REAL_TEST_METADATA = {
@@ -39,12 +41,20 @@ REAL_TEST_METADATA = {
 
 
 def _require_real_openai() -> None:
+    load_dotenv()
     if os.getenv(RUN_FLAG) != "1":
         pytest.skip(f"Set {RUN_FLAG}=1 to run OpenAI integration tests.")
     if not os.getenv("OPENAI_API_KEY"):
         pytest.fail("OPENAI_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
     if not os.getenv("LOGLLAMA_API_KEY"):
         pytest.fail("LOGLLAMA_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
+
+
+def _success_runs() -> int:
+    try:
+        return min(10, max(1, int(os.getenv(SUCCESS_RUNS_ENV, "1"))))
+    except ValueError:
+        pytest.fail(f"{SUCCESS_RUNS_ENV} must be an integer between 1 and 10.")
 
 
 def _require_backend() -> str:
@@ -72,6 +82,7 @@ def _wait_for_backend_request(endpoint: str, request_id: str) -> dict:
 
 def test_wrong_openai_api_key_posts_error_event_to_backend() -> None:
     openai = pytest.importorskip("openai")
+    load_dotenv()
     if os.getenv(RUN_FLAG) != "1":
         pytest.skip(f"Set {RUN_FLAG}=1 to run OpenAI integration tests.")
     if not os.getenv("LOGLLAMA_API_KEY"):
@@ -80,7 +91,10 @@ def test_wrong_openai_api_key_posts_error_event_to_backend() -> None:
     endpoint = _require_backend()
     request_id = f"wrong-key-{uuid.uuid4().hex}"
     client = logllama.wrap_openai(
-        openai.OpenAI(api_key="sk-logllama-intentionally-wrong-key"),
+        openai.OpenAI(
+            api_key="sk-logllama-intentionally-wrong-key",
+            max_retries=0,
+        ),
         api_key=os.environ["LOGLLAMA_API_KEY"],
         endpoint=endpoint,
         service_name="sdk-integration-tests",
@@ -113,16 +127,21 @@ def test_wrong_openai_api_key_posts_error_event_to_backend() -> None:
     assert event["prompt"]["_logllama_capture"] == "disabled"
     assert event["response"] is None
     assert event["error_type"]
+    assert event["provider_request_id"]
+    assert event["retry_count"] == 0
+    assert event["model_parameters"]["max_output_tokens"] == 1
 
 
-def test_valid_openai_api_key_captures_metadata_with_one_billable_call() -> None:
+def test_valid_openai_api_key_captures_metadata_for_bounded_billable_calls() -> None:
     openai = pytest.importorskip("openai")
     _require_real_openai()
 
     endpoint = _require_backend()
-    request_id = f"valid-key-{uuid.uuid4().hex}"
     client = logllama.wrap_openai(
-        openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"]),
+        openai.OpenAI(
+            api_key=os.environ["OPENAI_API_KEY"],
+            max_retries=0,
+        ),
         api_key=os.environ["LOGLLAMA_API_KEY"],
         endpoint=endpoint,
         service_name="sdk-integration-tests",
@@ -135,36 +154,40 @@ def test_valid_openai_api_key_captures_metadata_with_one_billable_call() -> None
         sample_rate=1,
     )
 
-    # This is intentionally the only billable OpenAI request in the test suite.
-    response = client.responses.create(
-        model=MODEL,
-        instructions="Respond with exactly this sentence and no extra text: LogLlama metadata capture works.",
-        input="Return the exact requested sentence.",
-        metadata={"logllama_test": "valid_key"},
-        logllama_metadata={**REAL_TEST_METADATA, "request_id": request_id},
-        reasoning={"effort": "minimal"},
-        text={"verbosity": "low"},
-        max_output_tokens=120,
-    )
+    for run_index in range(_success_runs()):
+        request_id = f"valid-key-{run_index}-{uuid.uuid4().hex}"
+        response = client.responses.create(
+            model=MODEL,
+            instructions="Reply with only: ok",
+            input="ok",
+            metadata={"logllama_test": "valid_key"},
+            logllama_metadata={**REAL_TEST_METADATA, "request_id": request_id},
+            reasoning={"effort": "minimal"},
+            text={"verbosity": "low"},
+            max_output_tokens=16,
+        )
 
-    event = _wait_for_backend_request(endpoint, request_id)
-    assert response is not None
-    assert getattr(response, "status", None) != "incomplete"
-    assert event["status"] == "success"
-    assert event["model"]
-    assert event["service_name"] == "sdk-integration-tests"
-    assert event["route"] == REAL_TEST_METADATA["route"]
-    assert event["user_id"] == REAL_TEST_METADATA["user_id"]
-    assert event["tenant_id"] == REAL_TEST_METADATA["tenant_id"]
-    assert event["session_id"] == REAL_TEST_METADATA["session_id"]
-    assert event["conversation_id"] == REAL_TEST_METADATA["conversation_id"]
-    assert event["request_id"] == request_id
-    assert event["trace_id"] == REAL_TEST_METADATA["trace_id"]
-    assert event["span_id"] == REAL_TEST_METADATA["span_id"]
-    assert event["prompt_template"] == REAL_TEST_METADATA["prompt_template"]
-    assert event["prompt_version"] == REAL_TEST_METADATA["prompt_version"]
-    assert set(REAL_TEST_METADATA["tags"]).issubset(set(event["tags"]))
-    assert event["custom_metadata"]["feature"] == "sdk_metadata_capture"
-    assert event["custom_metadata"]["api_key"] == "[REDACTED]"
-    assert event["privacy"]["sample_rate"] == 1
-    assert event["total_tokens"] >= 0
+        event = _wait_for_backend_request(endpoint, request_id)
+        assert response is not None
+        assert event["status"] == "success"
+        assert event["model"]
+        assert event["service_name"] == "sdk-integration-tests"
+        assert event["route"] == REAL_TEST_METADATA["route"]
+        assert event["user_id"] == REAL_TEST_METADATA["user_id"]
+        assert event["tenant_id"] == REAL_TEST_METADATA["tenant_id"]
+        assert event["session_id"] == REAL_TEST_METADATA["session_id"]
+        assert event["conversation_id"] == REAL_TEST_METADATA["conversation_id"]
+        assert event["request_id"] == request_id
+        assert event["trace_id"] == REAL_TEST_METADATA["trace_id"]
+        assert event["span_id"] == REAL_TEST_METADATA["span_id"]
+        assert event["prompt_template"] == REAL_TEST_METADATA["prompt_template"]
+        assert event["prompt_version"] == REAL_TEST_METADATA["prompt_version"]
+        assert set(REAL_TEST_METADATA["tags"]).issubset(set(event["tags"]))
+        assert event["custom_metadata"]["feature"] == "sdk_metadata_capture"
+        assert event["custom_metadata"]["api_key"] == "[REDACTED]"
+        assert event["privacy"]["sample_rate"] == 1
+        assert event["provider_request_id"]
+        assert event["retry_count"] == 0
+        assert event["model_parameters"]["max_output_tokens"] == 16
+        assert event["model_parameters"]["reasoning"] == {"effort": "minimal"}
+        assert event["total_tokens"] > 0
