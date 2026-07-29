@@ -87,6 +87,24 @@ class _Gemini:
         self.aio = SimpleNamespace(models=_AsyncModels())
 
 
+class _Interactions:
+    received: dict[str, Any] | None = None
+
+    def create(self, **kwargs: Any) -> Any:
+        self.received = kwargs
+        return SimpleNamespace(
+            id="gemini-interaction-123",
+            model=kwargs["model"],
+            output_text="ok",
+            usage=SimpleNamespace(input_tokens=2, output_tokens=1, total_tokens=3),
+        )
+
+
+class _InteractionsGemini:
+    def __init__(self) -> None:
+        self.interactions = _Interactions()
+
+
 class _GeminiError(RuntimeError):
     request_id = "gemini-error-request-123"
     retries_taken = 3
@@ -156,6 +174,27 @@ def test_gemini_wrapper_captures_usage_parameters_request_id_and_retries(monkeyp
         "thinking_config": {"thinking_level": "MINIMAL"},
     }
     assert events[0]["custom_metadata"]["comparison_id"] == "cmp-test"
+
+
+def test_gemini_interactions_uses_response_id_as_provider_request_id(monkeypatch) -> None:
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(instrumentation, "post_event_async", lambda _config, event: events.append(event))
+    client = logllama.wrap_gemini(
+        _InteractionsGemini(),
+        api_key="logllama-key",
+        capture_otel=False,
+    )
+
+    client.interactions.create(
+        model="gemini-test",
+        input="hello",
+        logllama_metadata={"request_id": "application-request-123"},
+    )
+
+    assert client.interactions.received is not None
+    assert "logllama_metadata" not in client.interactions.received
+    assert events[0]["operation"] == "interactions.create"
+    assert events[0]["provider_request_id"] == "gemini-interaction-123"
 
 
 def test_gemini_async_wrapper_captures_explicit_application_retry(monkeypatch) -> None:

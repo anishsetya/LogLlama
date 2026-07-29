@@ -256,7 +256,7 @@ def _remove_none_values(value: Any) -> Any:
 
 
 def _extract_provider_request_id(value: Any) -> str | None:
-    for name in ("_request_id", "request_id", "response_id"):
+    for name in ("_request_id", "request_id", "response_id", "id"):
         request_id = _read_value(value, name)
         if request_id:
             return str(request_id)

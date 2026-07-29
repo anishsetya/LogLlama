@@ -44,10 +44,10 @@ def _require_real_openai() -> None:
     load_dotenv()
     if os.getenv(RUN_FLAG) != "1":
         pytest.skip(f"Set {RUN_FLAG}=1 to run OpenAI integration tests.")
-    if not os.getenv("OPENAI_API_KEY"):
-        pytest.fail("OPENAI_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
     if not os.getenv("LOGLLAMA_API_KEY"):
         pytest.fail("LOGLLAMA_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
+    if not os.getenv("LOGLLAMA_RUNTIME_KEY"):
+        pytest.fail("LOGLLAMA_RUNTIME_KEY is required for Provider-tab integration tests.")
 
 
 def _success_runs() -> int:
@@ -80,51 +80,76 @@ def _wait_for_backend_request(endpoint: str, request_id: str) -> dict:
     pytest.fail(f"LogLlama backend did not return request_id={request_id}.")
 
 
-def test_wrong_openai_api_key_posts_error_event_to_backend() -> None:
+def _managed_openai(monkeypatch: pytest.MonkeyPatch, endpoint: str):
     openai = pytest.importorskip("openai")
-    load_dotenv()
-    if os.getenv(RUN_FLAG) != "1":
-        pytest.skip(f"Set {RUN_FLAG}=1 to run OpenAI integration tests.")
-    if not os.getenv("LOGLLAMA_API_KEY"):
-        pytest.fail("LOGLLAMA_API_KEY is required when RUN_LOGLLAMA_OPENAI_INTEGRATION=1.")
+    _require_real_openai()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert "OPENAI_API_KEY" not in os.environ
 
-    endpoint = _require_backend()
-    request_id = f"wrong-key-{uuid.uuid4().hex}"
-    client = logllama.wrap_openai(
-        openai.OpenAI(
-            api_key="sk-logllama-intentionally-wrong-key",
-            max_retries=0,
-        ),
-        api_key=os.environ["LOGLLAMA_API_KEY"],
+    return logllama.LLM.from_managed(
+        models={"openai": MODEL},
         endpoint=endpoint,
-        service_name="sdk-integration-tests",
-        environment="test",
-        version="0.1.0",
-        git_sha="integration-test",
-        capture_prompts=False,
-        capture_responses=False,
-        capture_errors=True,
-        sample_rate=1,
+        runtime_key=os.environ["LOGLLAMA_RUNTIME_KEY"],
+        refresh_seconds=300,
+        provider_factories={
+            "openai": lambda api_key: openai.OpenAI(api_key=api_key, max_retries=0),
+        },
+        instrumentation={
+            "api_key": os.environ["LOGLLAMA_API_KEY"],
+            "endpoint": endpoint,
+            "service_name": "sdk-integration-tests",
+            "environment": os.getenv("LOGLLAMA_TEST_ENVIRONMENT", "test"),
+            "version": "0.1.0",
+            "git_sha": "integration-test",
+            "redact_keys": ["api_key"],
+            "max_prompt_size": 4000,
+            "max_response_size": 4000,
+            "capture_errors": True,
+            "sample_rate": 1,
+            "capture_otel": False,
+        },
     )
 
-    with pytest.raises(Exception):
-        client.responses.create(
-            model=MODEL,
-            input="This request should fail authentication.",
-            metadata={"logllama_test": "wrong_key"},
-            logllama_metadata={**REAL_TEST_METADATA, "request_id": request_id},
-            max_output_tokens=1,
-        )
+
+def test_invalid_openai_model_from_managed_credentials_posts_error_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_real_openai()
+    endpoint = _require_backend()
+    client = _managed_openai(monkeypatch, endpoint)
+
+    request_id = f"managed-invalid-model-{uuid.uuid4().hex}"
+
+    try:
+        with pytest.raises(Exception):
+            client.generate(
+                "This request should fail because the model does not exist.",
+                provider="openai",
+                model="logllama-intentionally-invalid-model",
+                metadata={
+                    **REAL_TEST_METADATA,
+                    "request_id": request_id,
+                    "tags": ["integration", "openai", "managed", "invalid-model"],
+                    "custom_metadata": {
+                        "credential_source": "provider_tab",
+                        "api_key": "must-be-redacted",
+                    },
+                },
+                max_output_tokens=1,
+            )
+    finally:
+        client.close()
 
     event = _wait_for_backend_request(endpoint, request_id)
     assert event["status"] == "error"
     assert event["provider"] == "openai"
     assert event["operation"] == "responses.create"
     assert event["service_name"] == "sdk-integration-tests"
-    assert event["environment"] == "test"
+    assert event["environment"] == os.getenv("LOGLLAMA_TEST_ENVIRONMENT", "test")
     assert event["route"] == REAL_TEST_METADATA["route"]
     assert event["tenant_id"] == REAL_TEST_METADATA["tenant_id"]
-    assert event["prompt"]["_logllama_capture"] == "disabled"
+    assert event["custom_metadata"]["credential_source"] == "provider_tab"
+    assert event["custom_metadata"]["api_key"] == "[REDACTED]"
     assert event["response"] is None
     assert event["error_type"]
     assert event["provider_request_id"]
@@ -132,62 +157,59 @@ def test_wrong_openai_api_key_posts_error_event_to_backend() -> None:
     assert event["model_parameters"]["max_output_tokens"] == 1
 
 
-def test_valid_openai_api_key_captures_metadata_for_bounded_billable_calls() -> None:
-    openai = pytest.importorskip("openai")
+def test_valid_openai_managed_credentials_capture_bounded_billable_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _require_real_openai()
-
     endpoint = _require_backend()
-    client = logllama.wrap_openai(
-        openai.OpenAI(
-            api_key=os.environ["OPENAI_API_KEY"],
-            max_retries=0,
-        ),
-        api_key=os.environ["LOGLLAMA_API_KEY"],
-        endpoint=endpoint,
-        service_name="sdk-integration-tests",
-        environment=os.getenv("LOGLLAMA_TEST_ENVIRONMENT", "test"),
-        version="0.1.0",
-        git_sha="integration-test",
-        redact_keys=["api_key"],
-        max_prompt_size=4000,
-        max_response_size=4000,
-        sample_rate=1,
-    )
+    client = _managed_openai(monkeypatch, endpoint)
 
-    for run_index in range(_success_runs()):
-        request_id = f"valid-key-{run_index}-{uuid.uuid4().hex}"
-        response = client.responses.create(
-            model=MODEL,
-            instructions="Reply with only: ok",
-            input="ok",
-            metadata={"logllama_test": "valid_key"},
-            logllama_metadata={**REAL_TEST_METADATA, "request_id": request_id},
-            reasoning={"effort": "minimal"},
-            text={"verbosity": "low"},
-            max_output_tokens=16,
-        )
+    try:
+        for run_index in range(_success_runs()):
+            request_id = f"managed-valid-{run_index}-{uuid.uuid4().hex}"
+            response = client.generate(
+                "ok",
+                provider="openai",
+                system="Reply with only: ok",
+                metadata={
+                    **REAL_TEST_METADATA,
+                    "request_id": request_id,
+                    "custom_metadata": {
+                        **REAL_TEST_METADATA["custom_metadata"],
+                        "credential_source": "provider_tab",
+                    },
+                },
+                provider_options={
+                    "reasoning": {"effort": "minimal"},
+                    "text": {"verbosity": "low"},
+                },
+                max_output_tokens=16,
+            )
 
-        event = _wait_for_backend_request(endpoint, request_id)
-        assert response is not None
-        assert event["status"] == "success"
-        assert event["model"]
-        assert event["service_name"] == "sdk-integration-tests"
-        assert event["route"] == REAL_TEST_METADATA["route"]
-        assert event["user_id"] == REAL_TEST_METADATA["user_id"]
-        assert event["tenant_id"] == REAL_TEST_METADATA["tenant_id"]
-        assert event["session_id"] == REAL_TEST_METADATA["session_id"]
-        assert event["conversation_id"] == REAL_TEST_METADATA["conversation_id"]
-        assert event["request_id"] == request_id
-        assert event["trace_id"] == REAL_TEST_METADATA["trace_id"]
-        assert event["span_id"] == REAL_TEST_METADATA["span_id"]
-        assert event["prompt_template"] == REAL_TEST_METADATA["prompt_template"]
-        assert event["prompt_version"] == REAL_TEST_METADATA["prompt_version"]
-        assert set(REAL_TEST_METADATA["tags"]).issubset(set(event["tags"]))
-        assert event["custom_metadata"]["feature"] == "sdk_metadata_capture"
-        assert event["custom_metadata"]["api_key"] == "[REDACTED]"
-        assert event["privacy"]["sample_rate"] == 1
-        assert event["provider_request_id"]
-        assert event["retry_count"] == 0
-        assert event["model_parameters"]["max_output_tokens"] == 16
-        assert event["model_parameters"]["reasoning"] == {"effort": "minimal"}
-        assert event["total_tokens"] > 0
+            event = _wait_for_backend_request(endpoint, request_id)
+            assert response.raw is not None
+            assert event["status"] == "success"
+            assert event["model"]
+            assert event["service_name"] == "sdk-integration-tests"
+            assert event["route"] == REAL_TEST_METADATA["route"]
+            assert event["user_id"] == REAL_TEST_METADATA["user_id"]
+            assert event["tenant_id"] == REAL_TEST_METADATA["tenant_id"]
+            assert event["session_id"] == REAL_TEST_METADATA["session_id"]
+            assert event["conversation_id"] == REAL_TEST_METADATA["conversation_id"]
+            assert event["request_id"] == request_id
+            assert event["trace_id"] == REAL_TEST_METADATA["trace_id"]
+            assert event["span_id"] == REAL_TEST_METADATA["span_id"]
+            assert event["prompt_template"] == REAL_TEST_METADATA["prompt_template"]
+            assert event["prompt_version"] == REAL_TEST_METADATA["prompt_version"]
+            assert set(REAL_TEST_METADATA["tags"]).issubset(set(event["tags"]))
+            assert event["custom_metadata"]["feature"] == "sdk_metadata_capture"
+            assert event["custom_metadata"]["credential_source"] == "provider_tab"
+            assert event["custom_metadata"]["api_key"] == "[REDACTED]"
+            assert event["privacy"]["sample_rate"] == 1
+            assert event["provider_request_id"]
+            assert event["retry_count"] == 0
+            assert event["model_parameters"]["max_output_tokens"] == 16
+            assert event["model_parameters"]["reasoning"] == {"effort": "minimal"}
+            assert event["total_tokens"] > 0
+    finally:
+        client.close()
