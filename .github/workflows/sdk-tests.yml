@@ -6,8 +6,8 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      run_openai_integration:
-        description: Run the real OpenAI integration scenarios
+      run_provider_e2e:
+        description: Run 5 real OpenAI and 5 real Gemini calls through Provider-tab credentials
         required: false
         default: "false"
         type: choice
@@ -31,9 +31,11 @@ jobs:
       - name: Run safe SDK tests
         run: python -m pytest tests -q
 
-  openai-integration:
-    if: github.event_name == 'workflow_dispatch' && inputs.run_openai_integration == 'true'
+  provider-e2e:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_provider_e2e == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: provider-e2e
     services:
       postgres:
         image: postgres:16
@@ -56,26 +58,43 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install SDK test dependencies
-        run: python -m pip install -e ".[test]"
+      - name: Install SDK provider and test dependencies
+        run: python -m pip install -e ".[openai,gemini,test]"
       - name: Install backend dependencies
         working-directory: backend
         run: python -m pip install -r requirements.txt
-      - name: Require OpenAI secret
+      - name: Require provider secrets
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          test -n "$OPENAI_API_KEY" || {
-            echo "OPENAI_API_KEY secret is required for the manual OpenAI integration job."
+          test -n "$OPENAI_API_KEY" && test -n "$GEMINI_API_KEY" || {
+            echo "OPENAI_API_KEY and GEMINI_API_KEY secrets are required."
             exit 1
           }
-      - name: Start LogLlama backend
+      - name: Generate CI admin and runtime keys
+        working-directory: .
+        run: |
+          admin_key="$(openssl rand -hex 32)"
+          runtime_key="$(openssl rand -hex 32)"
+          echo "::add-mask::$admin_key"
+          echo "::add-mask::$runtime_key"
+          echo "LOGLLAMA_ADMIN_API_KEY=$admin_key" >> "$GITHUB_ENV"
+          echo "LOGLLAMA_DEFAULT_RUNTIME_KEY=$runtime_key" >> "$GITHUB_ENV"
+          echo "LOGLLAMA_RUNTIME_KEY=$runtime_key" >> "$GITHUB_ENV"
+      - name: Bootstrap persistent OpenBao
+        working-directory: .
+        run: scripts/openbao-local-bootstrap.sh
+      - name: Start LogLlama backend with OpenBao
         working-directory: backend
         env:
           DATABASE_URL: postgresql+asyncpg://logllama:logllama@localhost:5432/logllama
           LOGLLAMA_DEFAULT_API_KEY: llama-dev-key
           LOGLLAMA_DEFAULT_PROJECT_NAME: CI Integration
         run: |
+          set -a
+          source ../.openbao/backend.env
+          set +a
           python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/logllama-backend.log 2>&1 &
           for attempt in {1..30}; do
             curl -fsS http://127.0.0.1:8000/health && exit 0
@@ -83,11 +102,63 @@ jobs:
           done
           cat /tmp/logllama-backend.log
           exit 1
-      - name: Run real OpenAI integration tests
+      - name: Seed Provider-tab credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        working-directory: .
+        run: |
+          for provider in openai gemini; do
+            if [ "$provider" = openai ]; then
+              api_key="$OPENAI_API_KEY"
+            else
+              api_key="$GEMINI_API_KEY"
+            fi
+            jq -n \
+              --arg provider "$provider" \
+              --arg api_key "$api_key" \
+              '{provider: $provider, name: "ci-default", api_key: $api_key}' |
+              curl -fsS \
+                -H "Content-Type: application/json" \
+                -H "X-LogLlama-Admin-Key: $LOGLLAMA_ADMIN_API_KEY" \
+                --data-binary @- \
+                http://127.0.0.1:8000/api/admin/provider-credentials \
+                >/dev/null
+          done
+          unset OPENAI_API_KEY GEMINI_API_KEY api_key
+      - name: Verify OpenBao-backed runtime credentials
+        working-directory: .
+        run: |
+          response="$(
+            curl -fsS \
+              -H "X-LogLlama-Runtime-Key: $LOGLLAMA_RUNTIME_KEY" \
+              http://127.0.0.1:8000/v1/runtime/provider-credentials
+          )"
+          jq -e '
+            ([.credentials[].provider] | index("openai") != null) and
+            ([.credentials[].provider] | index("gemini") != null) and
+            (all(.credentials[]; (.api_key | length) > 0))
+          ' <<<"$response" >/dev/null
+          echo "OpenAI and Gemini credentials loaded from OpenBao."
+          unset response
+      - name: Run 5 OpenAI and 5 Gemini Provider-tab calls
         env:
           RUN_LOGLLAMA_OPENAI_INTEGRATION: "1"
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LOGLLAMA_OPENAI_SUCCESS_RUNS: "5"
+          RUN_LOGLLAMA_GEMINI_INTEGRATION: "1"
+          LOGLLAMA_GEMINI_SUCCESS_RUNS: "5"
           LOGLLAMA_API_KEY: llama-dev-key
           LOGLLAMA_ENDPOINT: http://127.0.0.1:8000
-          LOGLLAMA_OPENAI_TEST_MODEL: gpt-5-nano
-        run: python -m pytest tests/integration -m integration -q
+          LOGLLAMA_OPENAI_TEST_MODEL: ${{ vars.LOGLLAMA_OPENAI_TEST_MODEL || 'gpt-5-nano' }}
+          LOGLLAMA_GEMINI_TEST_MODEL: ${{ vars.LOGLLAMA_GEMINI_TEST_MODEL || 'gemini-3.5-flash-lite' }}
+        run: |
+          unset OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY ANTHROPIC_API_KEY
+          python -m pytest -q --durations=2 \
+            tests/integration/test_openai_capture.py::test_valid_openai_managed_credentials_capture_bounded_billable_calls \
+            tests/integration/test_gemini_capture.py::test_valid_gemini_managed_credentials_capture_bounded_calls
+      - name: Upload backend log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-e2e-backend-log
+          path: /tmp/logllama-backend.log

@@ -1,0 +1,40 @@
+# Render one copy per node with node-specific addresses and IDs.
+ui = false
+
+api_addr = "https://openbao-1.example.internal:8200"
+cluster_addr = "https://openbao-1.example.internal:8201"
+
+storage "raft" {
+  path = "/var/lib/openbao"
+  node_id = "openbao-1"
+  performance_multiplier = 1
+
+  retry_join {
+    leader_api_addr = "https://openbao-2.example.internal:8200"
+    leader_ca_cert_file = "/etc/openbao/tls/ca.pem"
+  }
+
+  retry_join {
+    leader_api_addr = "https://openbao-3.example.internal:8200"
+    leader_ca_cert_file = "/etc/openbao/tls/ca.pem"
+  }
+}
+
+listener "tcp" {
+  address = "0.0.0.0:8200"
+  cluster_address = "0.0.0.0:8201"
+  tls_cert_file = "/etc/openbao/tls/server.pem"
+  tls_key_file = "/etc/openbao/tls/server-key.pem"
+  tls_min_version = "tls12"
+}
+
+# Configure an external KMS plugin or transit seal before production rollout.
+# Never place an auto-unseal token directly in this file.
+
+audit "file" "stdout" {
+  description = "OpenBao API audit trail"
+  options {
+    file_path = "stdout"
+    log_raw = "false"
+  }
+}

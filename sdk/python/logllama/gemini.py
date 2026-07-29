@@ -24,6 +24,24 @@ def wrap_gemini(gemini_client: Any, **kwargs: Any) -> Any:
         prompt_keys=("contents",),
         config_overrides=kwargs,
     )
+    instrument_provider_method(
+        gemini_client,
+        path=("aio", "interactions"),
+        method_name="create",
+        provider="gemini",
+        operation="interactions.create",
+        prompt_keys=("input",),
+        config_overrides=kwargs,
+    )
+    instrument_provider_method(
+        gemini_client,
+        path=("aio", "models"),
+        method_name="generate_content",
+        provider="gemini",
+        operation="models.generate_content",
+        prompt_keys=("contents",),
+        config_overrides=kwargs,
+    )
     return gemini_client
 
 

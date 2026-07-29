@@ -2,7 +2,7 @@
 
 LLM observability in two lines of Python.
 
-LogLlama captures OpenAI requests, stores them in PostgreSQL, and shows costs, latency, tokens, prompts, responses, errors, and metadata in a developer dashboard.
+LogLlama captures OpenAI, Anthropic, and Gemini requests, provides client-side provider switching and approved comparison tests, and shows costs, latency, tokens, prompts, responses, errors, and metadata in a developer dashboard.
 
 ## Quick SDK Usage
 
@@ -55,9 +55,29 @@ client = logllama.wrap_openai(OpenAI())
 
 The older `track_openai(...)` API still works, but `init(...)` + `wrap_openai(...)` is the preferred developer flow.
 
+For provider-neutral calls:
+
+```python
+llm = logllama.LLM(
+    openai=openai_client,
+    anthropic=anthropic_client,
+    gemini=gemini_client,
+    models={
+        "openai": "gpt-model",
+        "anthropic": "claude-model",
+        "gemini": "gemini-model",
+    },
+)
+
+response = llm.generate("Explain this error.", provider="anthropic")
+```
+
 ## What Is Included
 
-- Python SDK with OpenAI request capture.
+- Python SDK with OpenAI, Anthropic, and Gemini request capture.
+- Provider-neutral `LLM.generate(..., provider=...)` routing.
+- Admin-approved, concurrent cross-provider comparison tests.
+- Managed provider credentials with startup/background SDK caching.
 - FastAPI ingestion backend.
 - PostgreSQL storage through SQLAlchemy.
 - React dashboard for request logs, cost, latency, token usage, prompts, responses, metadata, and errors.
@@ -100,6 +120,12 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
+AWS Secrets Manager is an optional backend dependency:
+
+```bash
+pip install -r requirements-aws.txt
+```
+
 The backend seeds a default project with this SDK key:
 
 ```text
@@ -136,13 +162,17 @@ Backend:
 ```text
 DATABASE_URL=postgresql+asyncpg://logllama:logllama@localhost:5432/logllama
 LOGLLAMA_DEFAULT_API_KEY=llama-dev-key
+LOGLLAMA_DEFAULT_RUNTIME_KEY=llama-runtime-key
 LOGLLAMA_DEFAULT_PROJECT_NAME=Development
+LOGLLAMA_ADMIN_API_KEY=llama-admin-key
+LOGLLAMA_SECRET_BACKEND=memory
 ```
 
 SDK:
 
 ```text
 LOGLLAMA_API_KEY=llama-dev-key
+LOGLLAMA_RUNTIME_KEY=llama-runtime-key
 LOGLLAMA_ENDPOINT=http://localhost:8000
 LOGLLAMA_TIMEOUT_SECONDS=1
 LOGLLAMA_CAPTURE_PROMPTS=true
@@ -163,9 +193,47 @@ LOGLLAMA_CAPTURE_OTEL=true
 LOGLLAMA_ENABLED=true
 ```
 
+`LOGLLAMA_SECRET_BACKEND=memory` is development-only and loses managed keys when the backend restarts. Production choices are `aws`, `vault`, and `openbao`; the backend stores only secret references and fingerprints in PostgreSQL.
+
+Vault and OpenBao share the same KV v2 configuration:
+
+```text
+LOGLLAMA_SECRET_BACKEND=openbao
+LOGLLAMA_SECRET_STORE_ADDR=http://127.0.0.1:8200
+LOGLLAMA_SECRET_STORE_TOKEN=replace-me
+LOGLLAMA_SECRET_STORE_MOUNT=secret
+LOGLLAMA_SECRET_STORE_TIMEOUT_SECONDS=2
+```
+
+The token should be injected into the backend process by the deployment environment, not stored in the admin portal. Managed provider credentials are fetched with the separate runtime key during SDK startup and refreshed in the background, never during a normal model call. This keeps secret-manager network latency out of customer model requests.
+Non-loopback Vault and OpenBao endpoints must use HTTPS.
+
+Benchmark local secret-store control-plane latency with:
+
+```bash
+cd backend
+PYTHONPATH=. ../.venv/bin/python benchmarks/secret_store_latency.py \
+  --vault-addr http://127.0.0.1:8200 --vault-token test-token \
+  --openbao-addr http://127.0.0.1:8300 --openbao-token test-token
+```
+
+Measure the full SDK preload endpoint separately:
+
+```bash
+cd backend
+PYTHONPATH=. .venv/bin/python benchmarks/runtime_preload_latency.py \
+  --endpoint http://127.0.0.1:8000 \
+  --runtime-key llama-runtime-key
+```
+
 ## API
 
 - `POST /v1/events` ingests SDK events. Requires `X-LogLlama-Api-Key`.
+- `POST /v1/test-plans` requests an admin-approved provider comparison.
+- `GET /v1/test-plans/{id}` checks the immutable comparison plan.
+- `GET /v1/runtime/provider-credentials` preloads managed credentials. Requires `X-LogLlama-Runtime-Key`.
+- `/api/admin/provider-credentials` manages write-only provider secrets.
+- `/api/admin/test-plans` lists, approves, and rejects comparison plans.
 - `GET /api/requests` lists captured requests.
 - `GET /api/requests?tenant_id=...&route=...&trace_id=...` filters captured requests by enterprise correlation fields.
 - `GET /api/requests/{request_id}` fetches one captured request.

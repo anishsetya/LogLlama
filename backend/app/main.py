@@ -6,13 +6,13 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Select, case, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import settings
+from .config import is_secure_privileged_key, settings
 from .database import Base, engine, get_session
 from .models import LLMRequest, Project, ProviderCredential, TestPlan
 from .pricing import estimate_cost_usd
@@ -70,8 +70,10 @@ async def lifespan(app: FastAPI):
                 runtime_key=settings.default_runtime_key,
             )
             session.add(project)
-        elif not project.runtime_key:
+        elif settings.default_runtime_key:
             project.runtime_key = settings.default_runtime_key
+        elif project.runtime_key and not is_secure_privileged_key(project.runtime_key):
+            project.runtime_key = None
         await session.commit()
 
     yield
@@ -114,6 +116,8 @@ async def project_from_runtime_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing X-LogLlama-Runtime-Key header.",
         )
+    if not is_secure_privileged_key(x_logllama_runtime_key):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid runtime key.")
     result = await session.execute(
         select(Project).where(Project.runtime_key == x_logllama_runtime_key)
     )
@@ -126,10 +130,27 @@ async def project_from_runtime_key(
 async def require_admin(
     x_logllama_admin_key: str | None = Header(default=None),
 ) -> None:
+    if settings.admin_api_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin authentication is not configured.",
+        )
     if not x_logllama_admin_key or not hmac.compare_digest(
         x_logllama_admin_key, settings.admin_api_key
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin key.")
+
+
+def require_persistent_secret_store() -> None:
+    if settings.secret_backend == "memory" and not settings.allow_ephemeral_secrets:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Provider credential writes require a persistent secret backend. "
+                "Configure OpenBao, Vault, or AWS Secrets Manager. "
+                "Set LOGLLAMA_ALLOW_EPHEMERAL_SECRETS=true only for disposable development."
+            ),
+        )
 
 
 async def default_project(session: AsyncSession) -> Project:
@@ -147,6 +168,10 @@ async def ensure_metadata_columns(conn) -> None:
         "ALTER TABLE test_plans ADD COLUMN IF NOT EXISTS max_runs INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE test_plans ADD COLUMN IF NOT EXISTS run_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS service_name VARCHAR(160)",
+        "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS provider_request_id VARCHAR(255)",
+        "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS model_parameters JSONB",
+        "CREATE INDEX IF NOT EXISTS ix_llm_requests_provider_request_id ON llm_requests (provider_request_id)",
         "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS environment VARCHAR(80)",
         "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS version VARCHAR(120)",
         "ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS git_sha VARCHAR(80)",
@@ -213,6 +238,7 @@ async def save_provider_credential(
     _: None = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> ProviderCredential:
+    require_persistent_secret_store()
     project = await default_project(session)
     result = await session.execute(
         select(ProviderCredential).where(
@@ -277,9 +303,12 @@ async def delete_provider_credential(
 
 @app.get("/v1/runtime/provider-credentials", response_model=RuntimeCredentialListOut)
 async def runtime_provider_credentials(
+    response: Response,
     project: Project = Depends(project_from_runtime_key),
     session: AsyncSession = Depends(get_session),
 ) -> RuntimeCredentialListOut:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     result = await session.execute(
         select(ProviderCredential).where(
             ProviderCredential.project_id == project.id,
@@ -470,6 +499,9 @@ async def ingest_event(
         provider=event.provider,
         operation=event.operation,
         model=event.model,
+        provider_request_id=event.provider_request_id,
+        retry_count=event.retry_count,
+        model_parameters=event.model_parameters,
         status=event.status,
         prompt=event.prompt,
         response=event.response,
@@ -803,6 +835,7 @@ def apply_request_filters(
                     LLMRequest.session_id.ilike(search),
                     LLMRequest.conversation_id.ilike(search),
                     LLMRequest.request_id.ilike(search),
+                    LLMRequest.provider_request_id.ilike(search),
                     LLMRequest.trace_id.ilike(search),
                     LLMRequest.prompt_template.ilike(search),
                     LLMRequest.prompt_version.ilike(search),

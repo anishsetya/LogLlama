@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from enum import Enum
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 import logllama
 import logllama.provider_instrumentation as instrumentation
@@ -31,6 +35,11 @@ class _Models:
         self.received = kwargs
         return SimpleNamespace(
             text="ok",
+            response_id="gemini-request-123",
+            model_version="gemini-test-001",
+            sdk_http_response=SimpleNamespace(
+                headers={"grpc-previous-rpc-attempts": "2"},
+            ),
             usage_metadata=SimpleNamespace(
                 prompt_token_count=3,
                 candidates_token_count=2,
@@ -39,9 +48,76 @@ class _Models:
         )
 
 
+class _AsyncModels:
+    received: dict[str, Any] | None = None
+
+    async def generate_content(self, **kwargs: Any) -> Any:
+        self.received = kwargs
+        return SimpleNamespace(
+            text="async ok",
+            response_id="gemini-async-request-123",
+            model_version="gemini-test-async-001",
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=4,
+                candidates_token_count=1,
+                total_token_count=5,
+            ),
+        )
+
+
+class _GenerateConfig:
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "top_k": 20,
+            "max_output_tokens": 16,
+            "thinking_config": {"thinking_level": _ThinkingLevel.MINIMAL},
+            "api_key": "must-not-be-captured",
+        }
+
+
+class _ThinkingLevel(str, Enum):
+    MINIMAL = "MINIMAL"
+
+
 class _Gemini:
     def __init__(self) -> None:
         self.models = _Models()
+        self.aio = SimpleNamespace(models=_AsyncModels())
+
+
+class _Interactions:
+    received: dict[str, Any] | None = None
+
+    def create(self, **kwargs: Any) -> Any:
+        self.received = kwargs
+        return SimpleNamespace(
+            id="gemini-interaction-123",
+            model=kwargs["model"],
+            output_text="ok",
+            usage=SimpleNamespace(input_tokens=2, output_tokens=1, total_tokens=3),
+        )
+
+
+class _InteractionsGemini:
+    def __init__(self) -> None:
+        self.interactions = _Interactions()
+
+
+class _GeminiError(RuntimeError):
+    request_id = "gemini-error-request-123"
+    retries_taken = 3
+
+
+class _FailingModels:
+    def generate_content(self, **_: Any) -> Any:
+        raise _GeminiError("provider unavailable")
+
+
+class _FailingGemini:
+    def __init__(self) -> None:
+        self.models = _FailingModels()
 
 
 def test_anthropic_wrapper_captures_and_removes_logllama_metadata(monkeypatch) -> None:
@@ -67,7 +143,7 @@ def test_anthropic_wrapper_captures_and_removes_logllama_metadata(monkeypatch) -
     assert events[0]["usage"]["total_tokens"] == 3
 
 
-def test_gemini_wrapper_normalizes_usage(monkeypatch) -> None:
+def test_gemini_wrapper_captures_usage_parameters_request_id_and_retries(monkeypatch) -> None:
     events: list[dict[str, Any]] = []
     monkeypatch.setattr(instrumentation, "post_event_async", lambda _config, event: events.append(event))
     client = logllama.wrap_gemini(
@@ -80,8 +156,96 @@ def test_gemini_wrapper_normalizes_usage(monkeypatch) -> None:
         model="gemini-test",
         contents="hello",
         logllama_metadata={"comparison_id": "cmp-test"},
+        config=_GenerateConfig(),
     )
 
+    assert client.models.received is not None
+    assert "logllama_metadata" not in client.models.received
     assert events[0]["provider"] == "gemini"
+    assert events[0]["model"] == "gemini-test-001"
     assert events[0]["usage"] == {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+    assert events[0]["provider_request_id"] == "gemini-request-123"
+    assert events[0]["retry_count"] == 2
+    assert events[0]["model_parameters"] == {
+        "temperature": 0.2,
+        "top_p": 0.8,
+        "top_k": 20,
+        "max_output_tokens": 16,
+        "thinking_config": {"thinking_level": "MINIMAL"},
+    }
     assert events[0]["custom_metadata"]["comparison_id"] == "cmp-test"
+
+
+def test_gemini_interactions_uses_response_id_as_provider_request_id(monkeypatch) -> None:
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(instrumentation, "post_event_async", lambda _config, event: events.append(event))
+    client = logllama.wrap_gemini(
+        _InteractionsGemini(),
+        api_key="logllama-key",
+        capture_otel=False,
+    )
+
+    client.interactions.create(
+        model="gemini-test",
+        input="hello",
+        logllama_metadata={"request_id": "application-request-123"},
+    )
+
+    assert client.interactions.received is not None
+    assert "logllama_metadata" not in client.interactions.received
+    assert events[0]["operation"] == "interactions.create"
+    assert events[0]["provider_request_id"] == "gemini-interaction-123"
+
+
+def test_gemini_async_wrapper_captures_explicit_application_retry(monkeypatch) -> None:
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(instrumentation, "post_event_async", lambda _config, event: events.append(event))
+    client = logllama.wrap_gemini(
+        _Gemini(),
+        api_key="logllama-key",
+        capture_otel=False,
+    )
+
+    response = asyncio.run(
+        client.aio.models.generate_content(
+            model="gemini-test",
+            contents="hello",
+            config={"temperature": 0},
+            logllama_metadata={
+                "request_id": "application-request-123",
+                "retry_count": 1,
+            },
+        )
+    )
+
+    assert response.text == "async ok"
+    assert events[0]["provider_request_id"] == "gemini-async-request-123"
+    assert events[0]["retry_count"] == 1
+    assert events[0]["request_id"] == "application-request-123"
+    assert events[0]["model_parameters"] == {"temperature": 0}
+    assert "retry_count" not in events[0]["custom_metadata"]
+
+
+def test_gemini_error_captures_request_id_retry_count_and_parameters(monkeypatch) -> None:
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(instrumentation, "post_event_async", lambda _config, event: events.append(event))
+    client = logllama.wrap_gemini(
+        _FailingGemini(),
+        api_key="logllama-key",
+        capture_otel=False,
+    )
+
+    with pytest.raises(_GeminiError):
+        client.models.generate_content(
+            model="gemini-test",
+            contents="hello",
+            config={"temperature": 0.4, "max_output_tokens": 8},
+        )
+
+    assert events[0]["status"] == "error"
+    assert events[0]["provider_request_id"] == "gemini-error-request-123"
+    assert events[0]["retry_count"] == 3
+    assert events[0]["model_parameters"] == {
+        "temperature": 0.4,
+        "max_output_tokens": 8,
+    }

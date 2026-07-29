@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 from typing import Protocol
 from urllib import error, parse, request
 
@@ -72,13 +73,17 @@ class VaultKvV2SecretStore:
     def __init__(
         self,
         addr: str,
-        token: str,
+        token: str | None = None,
         mount: str = "secret",
         namespace: str | None = None,
         timeout_seconds: float = 2.0,
+        role_id: str | None = None,
+        secret_id: str | None = None,
     ) -> None:
-        if not token:
-            raise ValueError("A secret-store token is required.")
+        if not token and not (role_id and secret_id):
+            raise ValueError("A secret-store token or AppRole credentials are required.")
+        if bool(role_id) != bool(secret_id):
+            raise ValueError("Both AppRole role_id and secret_id are required.")
         parsed_addr = parse.urlparse(addr)
         if parsed_addr.scheme not in {"http", "https"} or not parsed_addr.hostname:
             raise ValueError("Secret-store address must be an HTTP(S) URL.")
@@ -90,9 +95,12 @@ class VaultKvV2SecretStore:
             raise ValueError("Remote secret-store addresses must use HTTPS.")
         self._addr = addr.rstrip("/")
         self._token = token
+        self._role_id = role_id
+        self._secret_id = secret_id
         self._mount = parse.quote(mount.strip("/"), safe="")
         self._namespace = namespace
         self._timeout_seconds = timeout_seconds
+        self._auth_lock = threading.Lock()
 
     def put(self, reference: str, value: str) -> str:
         self._request(
@@ -126,9 +134,30 @@ class VaultKvV2SecretStore:
         url: str,
         payload: dict | None = None,
     ) -> dict:
+        token = self._current_token()
+        try:
+            return self._request_once(method, url, payload, token)
+        except error.HTTPError as exc:
+            if exc.code != 403 or not self._role_id:
+                raise self._mapped_http_error(exc) from exc
+        with self._auth_lock:
+            if self._token == token:
+                self._token = None
+        try:
+            return self._request_once(method, url, payload, self._current_token())
+        except error.HTTPError as exc:
+            raise self._mapped_http_error(exc) from exc
+
+    def _request_once(
+        self,
+        method: str,
+        url: str,
+        payload: dict | None,
+        token: str,
+    ) -> dict:
         headers = {
             "Content-Type": "application/json",
-            "X-Vault-Token": self._token,
+            "X-Vault-Token": token,
         }
         if self._namespace:
             headers["X-Vault-Namespace"] = self._namespace
@@ -138,11 +167,59 @@ class VaultKvV2SecretStore:
             with request.urlopen(req, timeout=self._timeout_seconds) as response:
                 raw = response.read()
         except error.HTTPError as exc:
-            if exc.code == 404:
-                raise KeyError(url.rsplit("/", 1)[-1]) from exc
-            raise RuntimeError(f"Secret store request failed with HTTP {exc.code}.") from exc
+            raise
         except error.URLError as exc:
             raise RuntimeError("Secret store is unavailable.") from exc
+        return self._decode_response(raw)
+
+    def _current_token(self) -> str:
+        if self._token:
+            return self._token
+        with self._auth_lock:
+            if self._token:
+                return self._token
+            self._token = self._login_approle()
+            return self._token
+
+    def _login_approle(self) -> str:
+        if not self._role_id or not self._secret_id:
+            raise RuntimeError("Secret-store authentication is not configured.")
+        headers = {"Content-Type": "application/json"}
+        if self._namespace:
+            headers["X-Vault-Namespace"] = self._namespace
+        body = json.dumps(
+            {"role_id": self._role_id, "secret_id": self._secret_id}
+        ).encode("utf-8")
+        req = request.Request(
+            f"{self._addr}/v1/auth/approle/login",
+            data=body,
+            method="POST",
+            headers=headers,
+        )
+        try:
+            with request.urlopen(req, timeout=self._timeout_seconds) as response:
+                payload = self._decode_response(response.read())
+        except error.HTTPError as exc:
+            raise RuntimeError(
+                f"Secret-store AppRole login failed with HTTP {exc.code}."
+            ) from exc
+        except error.URLError as exc:
+            raise RuntimeError("Secret store is unavailable.") from exc
+        try:
+            token = payload["auth"]["client_token"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError("Secret-store AppRole login returned no token.") from exc
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("Secret-store AppRole login returned no token.")
+        return token
+
+    def _mapped_http_error(self, exc: error.HTTPError) -> Exception:
+        if exc.code == 404:
+            return KeyError(exc.url.rsplit("/", 1)[-1])
+        return RuntimeError(f"Secret store request failed with HTTP {exc.code}.")
+
+    @staticmethod
+    def _decode_response(raw: bytes) -> dict:
         if not raw:
             return {}
         try:
@@ -168,17 +245,52 @@ def get_secret_store() -> SecretStore:
             if settings.secret_backend == "aws":
                 _store = AwsSecretStore(settings.aws_region)
             elif settings.secret_backend in {"vault", "openbao"}:
-                if not settings.secret_store_token:
-                    raise RuntimeError(
-                        "LOGLLAMA_SECRET_STORE_TOKEN is required for Vault or OpenBao."
+                token = _credential_value(
+                    settings.secret_store_token,
+                    settings.secret_store_token_file,
+                    "secret-store token",
+                )
+                role_id = None
+                secret_id = None
+                if not token:
+                    role_id = _credential_value(
+                        settings.secret_store_role_id,
+                        settings.secret_store_role_id_file,
+                        "AppRole role ID",
+                    )
+                    secret_id = _credential_value(
+                        settings.secret_store_secret_id,
+                        settings.secret_store_secret_id_file,
+                        "AppRole secret ID",
                     )
                 _store = VaultKvV2SecretStore(
                     addr=settings.secret_store_addr,
-                    token=settings.secret_store_token,
+                    token=token,
                     mount=settings.secret_store_mount,
                     namespace=settings.secret_store_namespace,
                     timeout_seconds=settings.secret_store_timeout_seconds,
+                    role_id=role_id,
+                    secret_id=secret_id,
                 )
             else:
                 _store = _memory_store
     return _store
+
+
+def _credential_value(
+    explicit_value: str | None,
+    file_name: str | None,
+    label: str,
+) -> str | None:
+    if explicit_value:
+        return explicit_value.strip()
+    if not file_name:
+        return None
+    path = Path(file_name).expanduser()
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"Unable to read {label} file '{path}'.") from exc
+    if not value:
+        raise RuntimeError(f"{label.capitalize()} file '{path}' is empty.")
+    return value
